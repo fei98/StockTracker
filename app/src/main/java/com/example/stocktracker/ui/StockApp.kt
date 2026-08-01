@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -21,6 +22,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -34,6 +36,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -49,6 +54,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -56,6 +62,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.stocktracker.QuoteResult
+import com.example.stocktracker.PrefsStorage
 import com.example.stocktracker.StockAccount
 import com.example.stocktracker.StockViewModel
 import com.example.stocktracker.TradeType
@@ -72,7 +79,10 @@ import kotlinx.coroutines.delay
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StockApp() {
-    val vm: StockViewModel = viewModel()
+    val context = LocalContext.current
+    val vm: StockViewModel = viewModel {
+        StockViewModel(PrefsStorage(context))
+    }
     val state by vm.state.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     var showClearDialog by remember { mutableStateOf(false) }
@@ -131,8 +141,7 @@ fun StockApp() {
                     item {
                         CurrentPriceCard(acc.currentPrice, vm::setCurrentPrice, vm::refreshPrice)
                     }
-                    item { TradeCard("买入", isBuy = true, vm::buy) }
-                    item { TradeCard("卖出", isBuy = false, vm::sell) }
+                    item { TradeCard(vm::buy, vm::sell) }
                     item { HoldingsCard(acc.lotPnls, acc.currentPrice) }
                     item { HistoryCard(acc.trades) }
                     item { ClearButton { showClearDialog = true } }
@@ -153,6 +162,8 @@ fun StockApp() {
         AddStockDialog(
             searchResult = state.searchResult,
             isSearching = state.isSearching,
+            searchedCode = state.searchedCode,
+            searchHint = state.searchHint,
             onSearch = vm::searchStock,
             onClearSearch = vm::clearSearch,
             onAdd = { vm.addStock(it); showAddDialog = false },
@@ -191,6 +202,8 @@ private fun StockBar(
 private fun AddStockDialog(
     searchResult: QuoteResult?,
     isSearching: Boolean,
+    searchedCode: String?,
+    searchHint: String?,
     onSearch: (String) -> Unit,
     onClearSearch: () -> Unit,
     onAdd: (QuoteResult) -> Unit,
@@ -234,7 +247,8 @@ private fun AddStockDialog(
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                         )
                     }
-                    isValidCodeInput(code.trim()) -> HintText("未找到该股票，请检查代码")
+                    searchedCode == code.trim() && searchHint != null -> HintText(searchHint)
+                    isValidCodeInput(code.trim()) -> HintText("输入完成，自动查询名称…")
                     else -> HintText("支持 A 股 6 位代码、港股 hk+代码、美股 us+代码，自动查询名称")
                 }
             }
@@ -289,7 +303,7 @@ private fun InfoCol(label: String, value: String, valueColor: Color = Color.Whit
     }
 }
 
-// ---------------- 现价卡片 ----------------
+// ---------------- 现价卡片（紧凑） ----------------
 @Composable
 private fun CurrentPriceCard(current: Double?, onSet: (Double?) -> Unit, onRefresh: () -> Unit) {
     var text by remember { mutableStateOf("") }
@@ -303,30 +317,49 @@ private fun CurrentPriceCard(current: Double?, onSet: (Double?) -> Unit, onRefre
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                 modifier = Modifier.weight(1f)
             )
-            Spacer(Modifier.width(8.dp))
-            Button(onClick = { text.toDoubleOrNull()?.let { onSet(it) } }) { Text("更新") }
             Spacer(Modifier.width(6.dp))
-            OutlinedButton(onClick = { text = ""; onSet(null) }) { Text("清除") }
-        }
-        Spacer(Modifier.height(8.dp))
-        OutlinedButton(onClick = onRefresh, modifier = Modifier.fillMaxWidth()) {
-            Text("刷新实时行情（联网获取现价）")
-        }
-        if (current != null) {
-            Spacer(Modifier.height(4.dp))
-            Text("当前现价：¥${formatPrice(current)}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+            Button(onClick = { text.toDoubleOrNull()?.let { onSet(it) } }) { Text("更新") }
+            Spacer(Modifier.width(4.dp))
+            TextButton(onClick = onRefresh) {
+                Icon(Icons.Default.Refresh, contentDescription = null, Modifier.size(16.dp))
+                Spacer(Modifier.width(2.dp))
+                Text("刷新")
+            }
+            TextButton(onClick = { text = ""; onSet(null) }) { Text("清除") }
         }
     }
 }
 
-// ---------------- 买入/卖出卡片 ----------------
+// ---------------- 交易卡片（买入/卖出切换） ----------------
 @Composable
-private fun TradeCard(title: String, isBuy: Boolean, onAction: (Double, Int) -> Unit) {
+private fun TradeCard(onBuy: (Double, Int) -> Unit, onSell: (Double, Int) -> Unit) {
+    var isBuy by remember { mutableStateOf(true) }
     var price by remember { mutableStateOf("") }
     var qty by remember { mutableStateOf("") }
     val btnColor = if (isBuy) UpColor else DownColor
 
-    SectionCard(title = title) {
+    SectionCard(title = "交易") {
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+            SegmentedButton(
+                selected = isBuy,
+                onClick = { isBuy = true },
+                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                colors = SegmentedButtonDefaults.colors(
+                    activeContainerColor = if (isBuy) UpColor else MaterialTheme.colorScheme.secondaryContainer,
+                    activeContentColor = if (isBuy) Color.White else MaterialTheme.colorScheme.onSecondaryContainer
+                )
+            ) { Text("买入") }
+            SegmentedButton(
+                selected = !isBuy,
+                onClick = { isBuy = false },
+                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                colors = SegmentedButtonDefaults.colors(
+                    activeContainerColor = if (!isBuy) DownColor else MaterialTheme.colorScheme.secondaryContainer,
+                    activeContentColor = if (!isBuy) Color.White else MaterialTheme.colorScheme.onSecondaryContainer
+                )
+            ) { Text("卖出") }
+        }
+        Spacer(Modifier.height(10.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(
                 value = price,
@@ -350,11 +383,14 @@ private fun TradeCard(title: String, isBuy: Boolean, onAction: (Double, Int) -> 
         Button(
             onClick = {
                 val p = price.toDoubleOrNull(); val q = qty.toIntOrNull()
-                if (p != null && q != null) { onAction(p, q); price = ""; qty = "" }
+                if (p != null && q != null) {
+                    if (isBuy) onBuy(p, q) else onSell(p, q)
+                    price = ""; qty = ""
+                }
             },
             colors = ButtonDefaults.buttonColors(containerColor = btnColor),
             modifier = Modifier.fillMaxWidth()
-        ) { Text(title, fontWeight = FontWeight.Bold) }
+        ) { Text(if (isBuy) "买入" else "卖出", fontWeight = FontWeight.Bold) }
     }
 }
 

@@ -98,6 +98,10 @@ data class StockState(
     val selectedIndex: Int = -1,
     val searchResult: QuoteResult? = null,
     val isSearching: Boolean = false,
+    /** 最近一次已完成查询的代码（用于判断"未找到"提示是否属于当前输入） */
+    val searchedCode: String? = null,
+    /** 查询结果提示：未找到 / 已在列表中（查询成功时为 null） */
+    val searchHint: String? = null,
     val message: String? = null
 ) {
     /** 当前选中的股票账户 */

@@ -11,6 +11,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class StockViewModel(
+    private val storage: Storage? = null,
     private val api: StockApi = StockApi()
 ) : ViewModel() {
 
@@ -20,12 +21,35 @@ class StockViewModel(
     private var nextId = 1L
     private var searchSeq = 0
 
+    init {
+        storage?.let { restore(it) }
+    }
+
+    /** 启动时从持久化存储恢复数据 */
+    private fun restore(storage: Storage) {
+        viewModelScope.launch {
+            val s = storage.load()
+            _state.value = s
+            nextId = maxOf(
+                s.accounts.flatMap { it.holdings.map { h -> h.id } }.maxOrNull() ?: 0L,
+                s.accounts.flatMap { it.trades.map { t -> t.id } }.maxOrNull() ?: 0L
+            ) + 1
+            _state.update { it.copy(message = if (s.accounts.isNotEmpty()) "已恢复上次保存的数据" else null) }
+        }
+    }
+
+    /** 每次数据变更后异步保存到本地 */
+    private fun persist() {
+        val snapshot = _state.value
+        storage?.let { st -> viewModelScope.launch { st.save(snapshot) } }
+    }
+
     // ---------------- 股票管理 ----------------
 
     /** 输入代码时自动查询名称/现价（带过期保护：只接受最新一次查询的结果） */
     fun searchStock(input: String) {
         if (inferMarket(input.trim()) == null) {
-            _state.update { it.copy(searchResult = null, isSearching = false) }
+            _state.update { it.copy(searchResult = null, isSearching = false, searchedCode = null, searchHint = null) }
             return
         }
         val token = ++searchSeq
@@ -35,16 +59,27 @@ class StockViewModel(
             if (token != searchSeq) return@launch
             _state.update { s ->
                 when {
-                    result == null -> s.copy(isSearching = false, searchResult = null, message = "未找到该股票，请检查代码")
+                    result == null -> s.copy(
+                        isSearching = false, searchResult = null,
+                        searchedCode = input.trim(), searchHint = "未找到该股票，请检查代码"
+                    )
                     s.accounts.any { it.stock.code == result.code && it.stock.market == result.market }
-                    -> s.copy(isSearching = false, searchResult = null, message = "该股票已在列表中")
-                    else -> s.copy(isSearching = false, searchResult = result)
+                    -> s.copy(
+                        isSearching = false, searchResult = null,
+                        searchedCode = input.trim(), searchHint = "该股票已在列表中"
+                    )
+                    else -> s.copy(
+                        isSearching = false, searchResult = result,
+                        searchedCode = input.trim(), searchHint = null
+                    )
                 }
             }
         }
     }
 
-    fun clearSearch() = _state.update { it.copy(searchResult = null, isSearching = false) }
+    fun clearSearch() = _state.update {
+        it.copy(searchResult = null, isSearching = false, searchedCode = null, searchHint = null)
+    }
 
     /** 确认添加股票并自动选中（同时记录查询到的现价） */
     fun addStock(result: QuoteResult) {
@@ -60,13 +95,19 @@ class StockViewModel(
                     accounts = s.accounts + acc,
                     selectedIndex = s.accounts.size,
                     searchResult = null,
+                    searchedCode = null,
+                    searchHint = null,
                     message = "已添加：${result.name} (${result.market}${result.code})"
                 )
             }
         }
+        persist()
     }
 
-    fun selectStock(index: Int) = _state.update { it.copy(selectedIndex = index) }
+    fun selectStock(index: Int) {
+        _state.update { it.copy(selectedIndex = index) }
+        persist()
+    }
 
     /** 刷新选中股票的实时价格并作为现价 */
     fun refreshPrice() {
@@ -80,6 +121,7 @@ class StockViewModel(
                     message = "已刷新现价：${formatPrice(price)} 元"
                 )
             }
+            persist()
         }
     }
 
@@ -101,6 +143,7 @@ class StockViewModel(
                 message = "买入成功：${formatPrice(price)} 元 × $qty 股"
             )
         }
+        persist()
     }
 
     /**
@@ -142,6 +185,7 @@ class StockViewModel(
                 message = "卖出成功：${formatPrice(price)} 元 × $qty 股，本次盈利 ${formatMoney(profit)} 元"
             )
         }
+        persist()
     }
 
     /** 手动设置选中股票的现价，用于计算各批次浮动盈亏 */
@@ -155,6 +199,7 @@ class StockViewModel(
                 message = if (price != null) "已更新现价 ${formatPrice(price)} 元" else "已清除现价"
             )
         }
+        persist()
     }
 
     /** 清空当前选中股票的数据 */
@@ -166,11 +211,13 @@ class StockViewModel(
                 message = "已清空「$name」的数据"
             )
         }
+        persist()
     }
 
     /** 一键清空所有股票 */
     fun clearAll() {
         _state.update { StockState(message = "已清空所有股票数据") }
+        persist()
     }
 
     /** 清除提示消息 */

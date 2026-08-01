@@ -61,7 +61,7 @@ fun parseTencentQuote(raw: String): QuoteResult? {
  * 腾讯行情接口（https://qt.gtimg.cn/q=sz000001）
  * 无需 key、国内直连快；返回 GBK 编码
  */
-class StockApi(
+open class StockApi(
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
@@ -79,7 +79,7 @@ class StockApi(
     }
 
     /** 按用户输入（如 000001 / hk00700 / usAAPL）查询股票名称与现价 */
-    suspend fun searchStock(input: String): QuoteResult? {
+    open suspend fun searchStock(input: String): QuoteResult? {
         val market = inferMarket(input) ?: return null
         val t = input.trim()
         val rawCode = if (market == "hk" || market == "us") t.substring(2) else t
@@ -88,7 +88,7 @@ class StockApi(
     }
 
     /** 查询某只股票的实时价格 */
-    suspend fun fetchPrice(stock: Stock): Double? {
+    open suspend fun fetchPrice(stock: Stock): Double? {
         val text = fetch(stock.marketCode) ?: return null
         return parseTencentQuote(text)?.price
     }
