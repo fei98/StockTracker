@@ -37,11 +37,28 @@ data class LotPnl(
     val pnlPercent: Double    // 盈亏百分比
 )
 
-data class StockState(
+/**
+ * 一只股票
+ * @param market 市场前缀：sh 沪 / sz 深 / bj 北交所 / hk 港股 / us 美股
+ */
+data class Stock(
+    val code: String,
+    val name: String,
+    val market: String
+) {
+    /** 接口用的完整代码，如 sz000001 */
+    val marketCode: String get() = "$market$code"
+
+    /** 展示用，如 平安银行 (sz000001) */
+    val displayName: String get() = "$name ($marketCode)"
+}
+
+/** 单只股票的全部记账数据 */
+data class StockAccount(
+    val stock: Stock,
     val holdings: List<BuyLot> = emptyList(),
     val trades: List<TradeRecord> = emptyList(),
-    val currentPrice: Double? = null,
-    val message: String? = null
+    val currentPrice: Double? = null
 ) {
     /** 总持仓数量 */
     val totalQty: Int get() = holdings.sumOf { it.remainingQty }
@@ -66,6 +83,25 @@ data class StockState(
             val pct = if (it.price > 0) (cp - it.price) / it.price * 100 else 0.0
             LotPnl(it, pnl, pct)
         }
+}
+
+/** 行情查询结果（输入代码后从接口返回） */
+data class QuoteResult(
+    val code: String,
+    val name: String,
+    val price: Double?,
+    val market: String
+)
+
+data class StockState(
+    val accounts: List<StockAccount> = emptyList(),
+    val selectedIndex: Int = -1,
+    val searchResult: QuoteResult? = null,
+    val isSearching: Boolean = false,
+    val message: String? = null
+) {
+    /** 当前选中的股票账户 */
+    val selected: StockAccount? get() = accounts.getOrNull(selectedIndex)
 }
 
 private val timeFormat = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())

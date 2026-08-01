@@ -1,9 +1,11 @@
 package com.example.stocktracker.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -13,15 +15,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -31,6 +36,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -48,15 +54,19 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.stocktracker.QuoteResult
+import com.example.stocktracker.StockAccount
 import com.example.stocktracker.StockViewModel
 import com.example.stocktracker.TradeType
 import com.example.stocktracker.formatMoney
 import com.example.stocktracker.formatPrice
 import com.example.stocktracker.formatTime
+import com.example.stocktracker.isValidCodeInput
 import com.example.stocktracker.ui.theme.DownColor
 import com.example.stocktracker.ui.theme.StockTrackerTheme
 import com.example.stocktracker.ui.theme.UpColor
 import com.example.stocktracker.ui.theme.pnlColor
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -64,6 +74,7 @@ fun StockApp() {
     val vm: StockViewModel = viewModel()
     val state by vm.state.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
+    var showClearDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(state.message) {
         state.message?.let { snackbar.showSnackbar(it); vm.clearMessage() }
@@ -89,49 +100,150 @@ fun StockApp() {
                     .padding(padding)
                     .padding(horizontal = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 12.dp)
+                contentPadding = PaddingValues(vertical = 12.dp)
             ) {
-                item { SummaryCard(state.totalQty, state.avgPrice, state.totalCost, state.currentPrice, state.marketValue, state.totalPnl) }
-                item { CurrentPriceCard(state.currentPrice, vm::setCurrentPrice) }
-                item { TradeCard("买入", isBuy = true, vm::buy) }
-                item { TradeCard("卖出", isBuy = false, vm::sell) }
-                item { HoldingsCard(state.lotPnls, state.currentPrice) }
-                item { HistoryCard(state.trades) }
-                item { ClearButton(vm::clearAll) }
-                item { Spacer(Modifier.height(8.dp)) }
+                if (state.accounts.isNotEmpty()) {
+                    item { StockBar(state.accounts, state.selectedIndex, vm::selectStock) }
+                }
+                item {
+                    AddStockCard(
+                        searchResult = state.searchResult,
+                        isSearching = state.isSearching,
+                        onSearch = vm::searchStock,
+                        onClearSearch = vm::clearSearch,
+                        onAdd = vm::addStock
+                    )
+                }
+                val acc = state.selected
+                if (acc == null) {
+                    item { EmptyStockHint() }
+                } else {
+                    item { SummaryCard(acc) }
+                    item {
+                        CurrentPriceCard(acc.currentPrice, vm::setCurrentPrice, vm::refreshPrice)
+                    }
+                    item { TradeCard("买入", isBuy = true, vm::buy) }
+                    item { TradeCard("卖出", isBuy = false, vm::sell) }
+                    item { HoldingsCard(acc.lotPnls, acc.currentPrice) }
+                    item { HistoryCard(acc.trades) }
+                    item { ClearButton { showClearDialog = true } }
+                }
             }
+        }
+    }
+
+    if (showClearDialog) {
+        ClearDialog(
+            onClearSelected = { vm.clearSelected(); showClearDialog = false },
+            onClearAll = { vm.clearAll(); showClearDialog = false },
+            onDismiss = { showClearDialog = false }
+        )
+    }
+}
+
+// ---------------- 股票切换标签栏 ----------------
+@Composable
+private fun StockBar(
+    accounts: List<StockAccount>,
+    selectedIndex: Int,
+    onSelect: (Int) -> Unit
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        accounts.forEachIndexed { i, acc ->
+            FilterChip(
+                selected = i == selectedIndex,
+                onClick = { onSelect(i) },
+                label = { Text(acc.stock.name) }
+            )
+        }
+    }
+}
+
+// ---------------- 添加股票卡片 ----------------
+@Composable
+private fun AddStockCard(
+    searchResult: QuoteResult?,
+    isSearching: Boolean,
+    onSearch: (String) -> Unit,
+    onClearSearch: () -> Unit,
+    onAdd: (QuoteResult) -> Unit
+) {
+    var code by remember { mutableStateOf("") }
+
+    LaunchedEffect(code) {
+        val c = code.trim()
+        if (isValidCodeInput(c)) {
+            delay(500) // 防抖，等用户输入完再查询
+            onSearch(c)
+        } else {
+            onClearSearch()
+        }
+    }
+
+    SectionCard(title = "添加股票") {
+        OutlinedTextField(
+            value = code,
+            onValueChange = { t ->
+                code = t.filter { it.isLetterOrDigit() }.uppercase()
+            },
+            label = { Text("股票代码（如 000001 / hk00700 / usAAPL）") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(Modifier.height(8.dp))
+        when {
+            isSearching -> HintText("查询中…")
+            searchResult != null -> Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text("${searchResult.name} (${searchResult.market}${searchResult.code})", fontWeight = FontWeight.Bold)
+                    Text(
+                        "现价 ${searchResult.price?.let { "¥${formatPrice(it)}" } ?: "未知"}",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+                Button(onClick = { onAdd(searchResult); code = "" }) { Text("添加并选中") }
+            }
+            isValidCodeInput(code.trim()) -> HintText("未找到该股票，请检查代码")
+            else -> HintText("支持 A 股 6 位代码、港股 hk+代码、美股 us+代码，自动查询名称")
         }
     }
 }
 
 // ---------------- 概览卡片 ----------------
 @Composable
-private fun SummaryCard(
-    totalQty: Int,
-    avgPrice: Double,
-    totalCost: Double,
-    currentPrice: Double?,
-    marketValue: Double,
-    totalPnl: Double
-) {
+private fun SummaryCard(acc: StockAccount) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primary)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("持仓概览", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            Text(
+                "持仓概览 · ${acc.stock.displayName}",
+                color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp
+            )
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                InfoCol("总持仓", "$totalQty 股")
-                InfoCol("持仓均价", "¥${formatPrice(avgPrice)}")
-                InfoCol("总成本", "¥${formatMoney(totalCost)}")
+                InfoCol("总持仓", "${acc.totalQty} 股")
+                InfoCol("持仓均价", "¥${formatPrice(acc.avgPrice)}")
+                InfoCol("总成本", "¥${formatMoney(acc.totalCost)}")
             }
             HorizontalDivider(color = Color.White.copy(alpha = 0.25f))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                InfoCol("现价", currentPrice?.let { "¥${formatPrice(it)}" } ?: "未设置")
-                InfoCol("市值", if (currentPrice != null) "¥${formatMoney(marketValue)}" else "—")
+                InfoCol("现价", acc.currentPrice?.let { "¥${formatPrice(it)}" } ?: "未设置")
+                InfoCol("市值", if (acc.currentPrice != null) "¥${formatMoney(acc.marketValue)}" else "—")
                 InfoCol(
                     "浮动盈亏",
-                    if (currentPrice != null) "${if (totalPnl >= 0) "+" else ""}${formatMoney(totalPnl)}" else "—",
-                    valueColor = if (currentPrice != null) {
-                        if (totalPnl > 0.0001) Color(0xFFFFCDD2)
-                        else if (totalPnl < -0.0001) Color(0xFFC8E6C9)
+                    if (acc.currentPrice != null) "${if (acc.totalPnl >= 0) "+" else ""}${formatMoney(acc.totalPnl)}" else "—",
+                    valueColor = if (acc.currentPrice != null) {
+                        if (acc.totalPnl > 0.0001) Color(0xFFFFCDD2)
+                        else if (acc.totalPnl < -0.0001) Color(0xFFC8E6C9)
                         else Color.White
                     } else Color.White
                 )
@@ -150,7 +262,7 @@ private fun InfoCol(label: String, value: String, valueColor: Color = Color.Whit
 
 // ---------------- 现价卡片 ----------------
 @Composable
-private fun CurrentPriceCard(current: Double?, onSet: (Double?) -> Unit) {
+private fun CurrentPriceCard(current: Double?, onSet: (Double?) -> Unit, onRefresh: () -> Unit) {
     var text by remember { mutableStateOf("") }
     SectionCard(title = "现价（计算浮动盈亏）") {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -166,6 +278,10 @@ private fun CurrentPriceCard(current: Double?, onSet: (Double?) -> Unit) {
             Button(onClick = { text.toDoubleOrNull()?.let { onSet(it) } }) { Text("更新") }
             Spacer(Modifier.width(6.dp))
             OutlinedButton(onClick = { text = ""; onSet(null) }) { Text("清除") }
+        }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(onClick = onRefresh, modifier = Modifier.fillMaxWidth()) {
+            Text("刷新实时行情（联网获取现价）")
         }
         if (current != null) {
             Spacer(Modifier.height(4.dp))
@@ -233,7 +349,7 @@ private fun HoldingsCard(lots: List<com.example.stocktracker.LotPnl>, currentPri
                     }
                     val pctText = if (currentPrice != null) String.format("%.2f%%", lp.pnlPercent) else "—"
                     Text(
-                        if (currentPrice != null) "${if (lp.pnl >= 0) "+" else ""}${formatMoney(lp.pnl)} 元" else "—",
+                        if (currentPrice != null) "${if (lp.pnl >= 0) "+" else ""}${formatMoney(lp.pnl)} 元 ($pctText)" else "—",
                         color = pnlColor(lp.pnl), fontWeight = FontWeight.Bold
                     )
                 }
@@ -292,19 +408,44 @@ private fun HistoryCard(trades: List<com.example.stocktracker.TradeRecord>) {
 
 // ---------------- 一键清空 ----------------
 @Composable
-private fun ClearButton(onClear: () -> Unit) {
+private fun ClearButton(onClick: () -> Unit) {
     Button(
-        onClick = onClear,
+        onClick = onClick,
         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.errorContainer),
         modifier = Modifier.fillMaxWidth()
     ) {
         Icon(Icons.Default.DeleteSweep, contentDescription = null)
         Spacer(Modifier.width(6.dp))
-        Text("一键清空所有数据", color = MaterialTheme.colorScheme.onErrorContainer)
+        Text("一键清空数据", color = MaterialTheme.colorScheme.onErrorContainer)
     }
 }
 
-// ---------------- 通用组件 ----------------
+@Composable
+private fun ClearDialog(onClearSelected: () -> Unit, onClearAll: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("一键清空") },
+        text = { Text("请选择清空范围：") },
+        confirmButton = {
+            TextButton(onClick = onClearAll) { Text("清空全部股票") }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onClearSelected) { Text("仅清空当前") }
+                TextButton(onClick = onDismiss) { Text("取消") }
+            }
+        }
+    )
+}
+
+// ---------------- 其他 ----------------
+@Composable
+private fun EmptyStockHint() {
+    SectionCard(title = "提示") {
+        Text("请先在上方输入股票代码添加股票。添加后即可记录买入/卖出、查看均价与盈亏。", fontSize = 13.sp)
+    }
+}
+
 @Composable
 private fun SectionCard(title: String, content: @Composable () -> Unit) {
     Card(
@@ -317,6 +458,11 @@ private fun SectionCard(title: String, content: @Composable () -> Unit) {
             content()
         }
     }
+}
+
+@Composable
+private fun HintText(text: String) {
+    Text(text, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
 }
 
 @Composable
