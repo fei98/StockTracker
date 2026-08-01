@@ -53,6 +53,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -210,6 +212,12 @@ private fun AddStockDialog(
     onDismiss: () -> Unit
 ) {
     var code by remember { mutableStateOf("") }
+    val focusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(Unit) {
+        delay(150) // 等弹窗动画完成再弹键盘
+        focusRequester.requestFocus()
+    }
 
     LaunchedEffect(code) {
         val c = code.trim()
@@ -233,8 +241,10 @@ private fun AddStockDialog(
                     },
                     label = { Text("股票代码（如 000001 / hk00700 / usAAPL）") },
                     singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
-                    modifier = Modifier.fillMaxWidth()
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(focusRequester)
                 )
                 Spacer(Modifier.height(8.dp))
                 when {
