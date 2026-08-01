@@ -9,7 +9,11 @@ import java.util.concurrent.TimeUnit
 
 /**
  * 判断输入的代码属于哪个市场，返回市场前缀；非法输入返回 null
- * 规则：6/9 开头 → 沪市 sh；0/3/2 开头 → 深市 sz；4/8 开头 → 北交所 bj；hk 前缀 → 港股；us 前缀 → 美股
+ * 6 位 A 股代码规则：
+ *   0 深主板 / 1 深基金(ETF、LOF) / 2 深B股 / 3 创业板 → sz
+ *   5 沪基金(ETF) / 6 沪主板 / 9 沪B股 → sh
+ *   4、8 开头 → 北交所 bj
+ * hk 前缀 → 港股；us 前缀 → 美股
  */
 fun inferMarket(code: String): String? {
     val t = code.trim()
@@ -17,8 +21,8 @@ fun inferMarket(code: String): String? {
     if (t.startsWith("us", true) && t.length >= 3) return "us"
     if (t.length == 6 && t.all { it.isDigit() }) {
         return when (t[0]) {
-            '6', '9' -> "sh"
-            '0', '3', '2' -> "sz"
+            '0', '1', '2', '3' -> "sz"
+            '5', '6', '9' -> "sh"
             '4', '8' -> "bj"
             else -> null
         }

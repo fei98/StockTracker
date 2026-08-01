@@ -459,6 +459,14 @@ class StockViewModelTest {
     }
 
     @Test
+    fun 市场判断_ETF基金代码() {
+        assertEquals("sz", inferMarket("159915"))  // 深市 ETF
+        assertEquals("sz", inferMarket("161725"))  // 深市 LOF
+        assertEquals("sh", inferMarket("510300"))  // 沪市 ETF
+        assertEquals("sh", inferMarket("588000"))  // 沪市科创 ETF
+    }
+
+    @Test
     fun 市场判断_港股_美股_不区分大小写() {
         assertEquals("hk", inferMarket("hk00700"))
         assertEquals("hk", inferMarket("HK00700"))
