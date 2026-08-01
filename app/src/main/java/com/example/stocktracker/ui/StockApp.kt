@@ -19,6 +19,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -75,6 +76,7 @@ fun StockApp() {
     val state by vm.state.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     var showClearDialog by remember { mutableStateOf(false) }
+    var showAddDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(state.message) {
         state.message?.let { snackbar.showSnackbar(it); vm.clearMessage() }
@@ -102,21 +104,28 @@ fun StockApp() {
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 contentPadding = PaddingValues(vertical = 12.dp)
             ) {
-                if (state.accounts.isNotEmpty()) {
-                    item { StockBar(state.accounts, state.selectedIndex, vm::selectStock) }
-                }
                 item {
-                    AddStockCard(
-                        searchResult = state.searchResult,
-                        isSearching = state.isSearching,
-                        onSearch = vm::searchStock,
-                        onClearSearch = vm::clearSearch,
-                        onAdd = vm::addStock
-                    )
+                    if (state.accounts.isEmpty()) {
+                        OutlinedButton(
+                            onClick = { showAddDialog = true },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("添加股票（输入代码自动查询名称）")
+                        }
+                    } else {
+                        StockBar(
+                            accounts = state.accounts,
+                            selectedIndex = state.selectedIndex,
+                            onSelect = vm::selectStock,
+                            onAddClick = { showAddDialog = true }
+                        )
+                    }
                 }
                 val acc = state.selected
                 if (acc == null) {
-                    item { EmptyStockHint() }
+                    // 无选中股票时只有添加按钮，无需其他提示
                 } else {
                     item { SummaryCard(acc) }
                     item {
@@ -139,6 +148,17 @@ fun StockApp() {
             onDismiss = { showClearDialog = false }
         )
     }
+
+    if (showAddDialog) {
+        AddStockDialog(
+            searchResult = state.searchResult,
+            isSearching = state.isSearching,
+            onSearch = vm::searchStock,
+            onClearSearch = vm::clearSearch,
+            onAdd = { vm.addStock(it); showAddDialog = false },
+            onDismiss = { showAddDialog = false }
+        )
+    }
 }
 
 // ---------------- 股票切换标签栏 ----------------
@@ -146,7 +166,8 @@ fun StockApp() {
 private fun StockBar(
     accounts: List<StockAccount>,
     selectedIndex: Int,
-    onSelect: (Int) -> Unit
+    onSelect: (Int) -> Unit,
+    onAddClick: () -> Unit
 ) {
     Row(
         Modifier
@@ -161,17 +182,19 @@ private fun StockBar(
                 label = { Text(acc.stock.name) }
             )
         }
+        FilterChip(selected = false, onClick = onAddClick, label = { Text("＋ 添加") })
     }
 }
 
-// ---------------- 添加股票卡片 ----------------
+// ---------------- 添加股票弹窗 ----------------
 @Composable
-private fun AddStockCard(
+private fun AddStockDialog(
     searchResult: QuoteResult?,
     isSearching: Boolean,
     onSearch: (String) -> Unit,
     onClearSearch: () -> Unit,
-    onAdd: (QuoteResult) -> Unit
+    onAdd: (QuoteResult) -> Unit,
+    onDismiss: () -> Unit
 ) {
     var code by remember { mutableStateOf("") }
 
@@ -185,39 +208,45 @@ private fun AddStockCard(
         }
     }
 
-    SectionCard(title = "添加股票") {
-        OutlinedTextField(
-            value = code,
-            onValueChange = { t ->
-                code = t.filter { it.isLetterOrDigit() }.uppercase()
-            },
-            label = { Text("股票代码（如 000001 / hk00700 / usAAPL）") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
-            modifier = Modifier.fillMaxWidth()
-        )
-        Spacer(Modifier.height(8.dp))
-        when {
-            isSearching -> HintText("查询中…")
-            searchResult != null -> Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text("${searchResult.name} (${searchResult.market}${searchResult.code})", fontWeight = FontWeight.Bold)
-                    Text(
-                        "现价 ${searchResult.price?.let { "¥${formatPrice(it)}" } ?: "未知"}",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                    )
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("添加股票") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = code,
+                    onValueChange = { t ->
+                        code = t.filter { it.isLetterOrDigit() }.uppercase()
+                    },
+                    label = { Text("股票代码（如 000001 / hk00700 / usAAPL）") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                when {
+                    isSearching -> HintText("查询中…")
+                    searchResult != null -> Column {
+                        Text("${searchResult.name} (${searchResult.market}${searchResult.code})", fontWeight = FontWeight.Bold)
+                        Text(
+                            "现价 ${searchResult.price?.let { "¥${formatPrice(it)}" } ?: "未知"}",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                        )
+                    }
+                    isValidCodeInput(code.trim()) -> HintText("未找到该股票，请检查代码")
+                    else -> HintText("支持 A 股 6 位代码、港股 hk+代码、美股 us+代码，自动查询名称")
                 }
-                Button(onClick = { onAdd(searchResult); code = "" }) { Text("添加并选中") }
             }
-            isValidCodeInput(code.trim()) -> HintText("未找到该股票，请检查代码")
-            else -> HintText("支持 A 股 6 位代码、港股 hk+代码、美股 us+代码，自动查询名称")
-        }
-    }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { searchResult?.let { onAdd(it); code = "" } },
+                enabled = searchResult != null
+            ) { Text("添加") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
 }
 
 // ---------------- 概览卡片 ----------------
@@ -439,13 +468,6 @@ private fun ClearDialog(onClearSelected: () -> Unit, onClearAll: () -> Unit, onD
 }
 
 // ---------------- 其他 ----------------
-@Composable
-private fun EmptyStockHint() {
-    SectionCard(title = "提示") {
-        Text("请先在上方输入股票代码添加股票。添加后即可记录买入/卖出、查看均价与盈亏。", fontSize = 13.sp)
-    }
-}
-
 @Composable
 private fun SectionCard(title: String, content: @Composable () -> Unit) {
     Card(
