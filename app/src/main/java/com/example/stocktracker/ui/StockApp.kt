@@ -39,6 +39,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -77,6 +78,7 @@ import com.example.stocktracker.ui.theme.StockTrackerTheme
 import com.example.stocktracker.ui.theme.UpColor
 import com.example.stocktracker.ui.theme.pnlColor
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -91,7 +93,13 @@ fun StockApp() {
     var showAddDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(state.message) {
-        state.message?.let { snackbar.showSnackbar(it); vm.clearMessage() }
+        state.message?.let { msg ->
+            val job = launch { snackbar.showSnackbar(msg, duration = SnackbarDuration.Short) }
+            delay(2000) // 2 秒后自动关闭
+            snackbar.currentSnackbarData?.dismiss()
+            job.join()
+            vm.clearMessage()
+        }
     }
 
     StockTrackerTheme {
@@ -143,8 +151,8 @@ fun StockApp() {
                     item {
                         CurrentPriceCard(acc.currentPrice, vm::setCurrentPrice, vm::refreshPrice)
                     }
-                    item { TradeCard(vm::buy, vm::sell) }
-                    item { HoldingsCard(acc.lotPnls, acc.currentPrice) }
+                    item { TradeCard(acc.sellableQty, vm::buy, vm::sell) }
+                    item { HoldingsCard(acc) }
                     item { HistoryCard(acc.trades) }
                     item { ClearButton { showClearDialog = true } }
                 }
@@ -284,6 +292,7 @@ private fun SummaryCard(acc: StockAccount) {
             )
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 InfoCol("总持仓", "${acc.totalQty} 股")
+                InfoCol("可卖", "${acc.sellableQty} 股")
                 InfoCol("持仓均价", "¥${formatPrice(acc.avgPrice)}")
                 InfoCol("总成本", "¥${formatMoney(acc.totalCost)}")
             }
@@ -342,7 +351,7 @@ private fun CurrentPriceCard(current: Double?, onSet: (Double?) -> Unit, onRefre
 
 // ---------------- 交易卡片（买入/卖出切换） ----------------
 @Composable
-private fun TradeCard(onBuy: (Double, Int) -> Unit, onSell: (Double, Int) -> Unit) {
+private fun TradeCard(sellableQty: Int, onBuy: (Double, Int) -> Unit, onSell: (Double, Int) -> Unit) {
     var isBuy by remember { mutableStateOf(true) }
     var price by remember { mutableStateOf("") }
     var qty by remember { mutableStateOf("") }
@@ -368,6 +377,13 @@ private fun TradeCard(onBuy: (Double, Int) -> Unit, onSell: (Double, Int) -> Uni
                     activeContentColor = if (!isBuy) Color.White else MaterialTheme.colorScheme.onSecondaryContainer
                 )
             ) { Text("卖出") }
+        }
+        if (!isBuy) {
+            Spacer(Modifier.height(4.dp))
+            HintText(
+                if (sellableQty > 0) "可卖 $sellableQty 股（当日买入的部分 T+1 冻结）"
+                else "今日买入的股票需 T+1，次日才能卖出"
+            )
         }
         Spacer(Modifier.height(10.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -406,13 +422,16 @@ private fun TradeCard(onBuy: (Double, Int) -> Unit, onSell: (Double, Int) -> Uni
 
 // ---------------- 持仓明细卡片 ----------------
 @Composable
-private fun HoldingsCard(lots: List<com.example.stocktracker.LotPnl>, currentPrice: Double?) {
-    SectionCard(title = "持仓明细") {
+private fun HoldingsCard(acc: com.example.stocktracker.StockAccount) {
+    val lots = acc.lotPnls
+    val sellableIds = acc.sellableHoldings.map { it.id }.toSet()
+    SectionCard(title = "持仓明细（T+1：当日买入不可卖）") {
         if (lots.isEmpty()) {
             EmptyText("暂无持仓")
         } else {
             lots.sortedByDescending { it.lot.price }.forEach { lp ->
                 val lot = lp.lot
+                val frozen = lot.id !in sellableIds
                 Row(
                     Modifier.fillMaxWidth().padding(vertical = 6.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -420,11 +439,29 @@ private fun HoldingsCard(lots: List<com.example.stocktracker.LotPnl>, currentPri
                 ) {
                     Column {
                         Text("¥${formatPrice(lot.price)} 买入", fontWeight = FontWeight.Medium)
-                        Text("剩余 ${lot.remainingQty} 股", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("剩余 ${lot.remainingQty} 股", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                            Spacer(Modifier.width(6.dp))
+                            if (frozen) {
+                                Box(
+                                    Modifier
+                                        .background(Color(0xFFF9A825).copy(alpha = 0.15f), RoundedCornerShape(4.dp))
+                                        .padding(horizontal = 5.dp, vertical = 1.dp)
+                                ) {
+                                    Text(
+                                        "今日买入 · T+1冻结",
+                                        color = Color(0xFFF9A825),
+                                        fontSize = 10.sp, fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            } else {
+                                Text("可卖", fontSize = 11.sp, color = UpColor)
+                            }
+                        }
                     }
-                    val pctText = if (currentPrice != null) String.format("%.2f%%", lp.pnlPercent) else "—"
+                    val pctText = if (acc.currentPrice != null) String.format("%.2f%%", lp.pnlPercent) else "—"
                     Text(
-                        if (currentPrice != null) "${if (lp.pnl >= 0) "+" else ""}${formatMoney(lp.pnl)} 元 ($pctText)" else "—",
+                        if (acc.currentPrice != null) "${if (lp.pnl >= 0) "+" else ""}${formatMoney(lp.pnl)} 元 ($pctText)" else "—",
                         color = pnlColor(lp.pnl), fontWeight = FontWeight.Bold
                     )
                 }

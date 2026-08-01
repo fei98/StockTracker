@@ -127,11 +127,11 @@ class StockViewModel(
 
     // ---------------- 买入/卖出（作用于当前选中股票） ----------------
 
-    fun buy(price: Double, qty: Int) {
+    fun buy(price: Double, qty: Int, time: Long = System.currentTimeMillis()) {
         if (price <= 0 || qty <= 0) { notify("请输入正确的单价和数量"); return }
         val idx = _state.value.selectedIndex
         if (idx < 0) { notify("请先添加并选择股票"); return }
-        val lot = BuyLot(id = nextId++, price = price, originalQty = qty, remainingQty = qty)
+        val lot = BuyLot(id = nextId++, price = price, originalQty = qty, remainingQty = qty, time = time)
         _state.update { s ->
             s.copy(
                 accounts = updateSelected(s) { a ->
@@ -147,7 +147,7 @@ class StockViewModel(
     }
 
     /**
-     * 卖出：按“最低价优先抵扣”匹配持仓。
+     * 卖出：按“最低价优先抵扣”匹配可卖持仓（T+1：当日买入的 A 股批次不可卖）。
      * 例如持仓含 1元100、3元300、5元200，卖出300股 @4元：
      *   先抵扣1元100股（盈利300），再抵扣3元200股（盈利200），合计盈利500，3元剩100股。
      */
@@ -156,14 +156,18 @@ class StockViewModel(
         val s = _state.value
         val acc = s.selected ?: run { notify("请先添加并选择股票"); return }
         if (acc.totalQty <= 0) { notify("当前无持仓，无法卖出"); return }
-        if (qty > acc.totalQty) { notify("卖出数量超过持仓（${acc.totalQty} 股）"); return }
+        if (acc.sellableQty <= 0) { notify("今日买入的股票需 T+1，次日才能卖出"); return }
+        if (qty > acc.sellableQty) { notify("卖出数量超过持仓可卖数量（${acc.sellableQty} 股）"); return }
 
-        val sorted = acc.holdings.sortedBy { it.price } // 单价从低到高抵扣
+        val sellableIds = acc.sellableHoldings.map { it.id }.toSet()
         var toSell = qty
         var profit = 0.0
         val remaining = mutableListOf<BuyLot>()
 
-        for (lot in sorted) {
+        // 冻结批次（当日买入）原样保留，不参与卖出
+        acc.holdings.filter { it.id !in sellableIds }.forEach { remaining.add(it) }
+        // 可卖批次按单价从低到高抵扣
+        for (lot in acc.sellableHoldings.sortedBy { it.price }) {
             if (toSell <= 0) {
                 remaining.add(lot); continue
             }

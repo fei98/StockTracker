@@ -82,9 +82,10 @@ class StockPersistenceTest {
     fun 卖出后保存结果与盈亏() = runTest {
         val fake = FakeStorage()
         val vm = StockViewModel(fake)
+        val yesterday = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
         vm.addStock(QuoteResult("000001", "平安银行", null, "sz"))
-        vm.buy(1.0, 100)
-        vm.buy(3.0, 300)
+        vm.buy(1.0, 100, time = yesterday)
+        vm.buy(3.0, 300, time = yesterday)
         vm.sell(4.0, 150) // 抵1元100(+300) + 3元50(+50) = 350
         val last = fake.saved.last()
         assertEquals(250, last.accounts[0].totalQty)

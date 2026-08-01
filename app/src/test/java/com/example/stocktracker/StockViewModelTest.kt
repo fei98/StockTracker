@@ -13,6 +13,9 @@ class StockViewModelTest {
 
     private fun newVm() = StockViewModel()
 
+    /** 昨天的同一时刻（买入后次日才可卖，用于构造可卖持仓） */
+    private val yesterday = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
+
     private fun quote(code: String = "000001", name: String = "平安银行", price: Double? = null) =
         QuoteResult(code, name, price, "sz")
 
@@ -23,10 +26,10 @@ class StockViewModelTest {
         return vm
     }
 
-    /** 已添加股票，连续多次买入 */
+    /** 已添加股票，连续多次买入（昨天买入，均可卖） */
     private fun vmWithBuys(vararg buys: Pair<Double, Int>): StockViewModel {
         val vm = vmWithStock()
-        buys.forEach { (p, q) -> vm.buy(p, q) }
+        buys.forEach { (p, q) -> vm.buy(p, q, time = yesterday) }
         return vm
     }
 
@@ -369,9 +372,9 @@ class StockViewModelTest {
     fun 多股票_卖出匹配只在当前股票内进行() {
         val vm = newVm()
         vm.addStock(quote("000001", "平安银行"))
-        vm.buy(5.0, 200)
+        vm.buy(5.0, 200, time = yesterday)
         vm.addStock(quote("600519", "贵州茅台"))
-        vm.buy(1.0, 100)
+        vm.buy(1.0, 100, time = yesterday)
         vm.sell(2.0, 100) // 在茅台内：1元100股全部卖出，盈利100
 
         val maotai = vm.state.value.selected!!
@@ -528,5 +531,78 @@ class StockViewModelTest {
         vm.buy(3.0, 100)
         vm.buy(2.0, 100)
         assertTrue(vm.state.value.message!!.contains("2.00"))
+    }
+
+    // ---------------- T+1 可卖规则 ----------------
+
+    @Test
+    fun T1_当日买入_不可卖_卖出被拒绝() {
+        val vm = vmWithStock()
+        vm.buy(3.0, 100) // 今天买入
+        val acc = vm.state.value.selected!!
+        assertEquals(100, acc.totalQty)
+        assertEquals(0, acc.sellableQty)
+        vm.sell(3.5, 100)
+        assertTrue(acc.trades.size == 1) // 只有买入记录
+        assertTrue(vm.state.value.message!!.contains("T+1"))
+    }
+
+    @Test
+    fun T1_昨日买入_可卖() {
+        val vm = vmWithStock()
+        vm.buy(3.0, 100, time = yesterday)
+        assertEquals(100, vm.state.value.selected!!.sellableQty)
+        vm.sell(3.5, 100)
+        assertEquals(50.0, vm.state.value.selected!!.trades.last().profit, 0.0001)
+    }
+
+    @Test
+    fun T1_部分冻结_只能卖可卖部分() {
+        val vm = vmWithStock()
+        vm.buy(3.0, 100, time = yesterday) // 可卖
+        vm.buy(5.0, 200)                   // 今日买入冻结
+        var acc = vm.state.value.selected!!
+        assertEquals(300, acc.totalQty)
+        assertEquals(100, acc.sellableQty)
+        vm.sell(4.0, 150) // 超过可卖数量，被拒
+        assertTrue(vm.state.value.message!!.contains("可卖数量"))
+        acc = vm.state.value.selected!!
+        assertEquals(300, acc.totalQty)
+        vm.sell(4.0, 100) // 只卖可卖的 100 股
+        acc = vm.state.value.selected!!
+        assertEquals(200, acc.totalQty)
+        assertEquals(0, acc.sellableQty) // 剩的全是今日买入的冻结批次
+        assertEquals(100.0, acc.trades.last().profit, 0.0001)
+    }
+
+    @Test
+    fun T1_卖出只抵扣可卖批次_不动冻结批次() {
+        val vm = vmWithStock()
+        vm.buy(1.0, 100, time = yesterday) // 可卖，低价
+        vm.buy(3.0, 100)                   // 今日买入，冻结
+        vm.sell(2.0, 100)
+        val acc = vm.state.value.selected!!
+        // 只抵扣1元的100股，3元冻结批次保留
+        assertEquals(100, acc.totalQty)
+        assertEquals(3.0, acc.holdings[0].price, 0.0001)
+        assertEquals(100, acc.holdings[0].remainingQty)
+        assertEquals(100.0, acc.trades.last().profit, 0.0001)
+    }
+
+    @Test
+    fun T1_港股美股当日可卖() {
+        val vm = newVm()
+        vm.addStock(quote("00700", "腾讯控股").copy(market = "hk"))
+        vm.buy(300.0, 100) // 今天买入
+        assertEquals(100, vm.state.value.selected!!.sellableQty)
+        vm.sell(310.0, 100)
+        assertEquals(1000.0, vm.state.value.selected!!.trades.last().profit, 0.0001)
+
+        val vm2 = newVm()
+        vm2.addStock(quote("AAPL", "苹果").copy(market = "us"))
+        vm2.buy(200.0, 10)
+        assertEquals(10, vm2.state.value.selected!!.sellableQty)
+        vm2.sell(210.0, 10)
+        assertEquals(100.0, vm2.state.value.selected!!.trades.last().profit, 0.0001)
     }
 }

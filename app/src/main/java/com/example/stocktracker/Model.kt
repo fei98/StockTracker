@@ -1,18 +1,29 @@
 package com.example.stocktracker
 
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
 /**
  * 单笔买入持仓（按买入批次记录，便于按价格高低抵扣）
+ * @param time 买入时间戳；0 表示历史/未知时间（视为可卖）
  */
 data class BuyLot(
     val id: Long,
     val price: Double,        // 买入单价
     val originalQty: Int,     // 原始买入数量
-    val remainingQty: Int     // 剩余未卖出数量
+    val remainingQty: Int,    // 剩余未卖出数量
+    val time: Long = 0L
 )
+
+/** 判断两个时间戳是否同一天（用于 T+1 判断） */
+fun isSameDay(a: Long, b: Long): Boolean {
+    val ca = Calendar.getInstance().apply { timeInMillis = a }
+    val cb = Calendar.getInstance().apply { timeInMillis = b }
+    return ca.get(Calendar.YEAR) == cb.get(Calendar.YEAR) &&
+        ca.get(Calendar.DAY_OF_YEAR) == cb.get(Calendar.DAY_OF_YEAR)
+}
 
 /**
  * 交易记录（用于历史展示）
@@ -62,6 +73,18 @@ data class StockAccount(
 ) {
     /** 总持仓数量 */
     val totalQty: Int get() = holdings.sumOf { it.remainingQty }
+
+    /** T+1 可卖批次：A 股（sh/sz/bj）当日买入的冻结，港美股 T+0 当日即可卖 */
+    val sellableHoldings: List<BuyLot>
+        get() {
+            val now = System.currentTimeMillis()
+            return holdings.filter { lot ->
+                stock.market == "hk" || stock.market == "us" || !isSameDay(lot.time, now)
+            }
+        }
+
+    /** 可卖数量 */
+    val sellableQty: Int get() = sellableHoldings.sumOf { it.remainingQty }
 
     /** 持仓总成本 */
     val totalCost: Double get() = holdings.sumOf { it.price * it.remainingQty }

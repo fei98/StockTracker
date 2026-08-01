@@ -48,6 +48,7 @@ private fun buildState(s: StockState): String {
                     .put("price", lot.price)
                     .put("originalQty", lot.originalQty)
                     .put("remainingQty", lot.remainingQty)
+                    .put("time", lot.time)
             )
         }
         val trades = JSONArray()
@@ -85,7 +86,7 @@ private fun parseState(raw: String): StockState {
         val holdingsArr = a.getJSONArray("holdings")
         for (j in 0 until holdingsArr.length()) {
             val l = holdingsArr.getJSONObject(j)
-            holdings.add(BuyLot(l.getLong("id"), l.getDouble("price"), l.getInt("originalQty"), l.getInt("remainingQty")))
+            holdings.add(BuyLot(l.getLong("id"), l.getDouble("price"), l.getInt("originalQty"), l.getInt("remainingQty"), l.optLong("time", 0L)))
         }
         val trades = mutableListOf<TradeRecord>()
         val tradesArr = a.getJSONArray("trades")
