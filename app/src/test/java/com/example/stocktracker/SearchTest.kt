@@ -7,9 +7,13 @@ import org.junit.Rule
 import org.junit.Test
 
 /** 模拟行情接口（不联网） */
-class FakeApi(private val result: QuoteResult? = null, private val price: Double? = null) : StockApi() {
+class FakeApi(
+    private val result: QuoteResult? = null,
+    private val price: Double? = null,
+    private val prices: Map<String, Double> = emptyMap()
+) : StockApi() {
     override suspend fun searchStock(input: String): QuoteResult? = result
-    override suspend fun fetchPrice(stock: Stock): Double? = price
+    override suspend fun fetchPrice(stock: Stock): Double? = prices[stock.marketCode] ?: price
 }
 
 /** 覆盖：搜索股票名称/现价、搜索失败提示、重复股票提示、清除搜索 */
@@ -84,5 +88,31 @@ class SearchTest {
         assertNull(s.searchResult)
         assertNull(s.searchedCode)
         assertNull(s.searchHint)
+    }
+
+    @Test
+    fun 一键刷新全部_更新所有股票现价() {
+        val api = FakeApi(prices = mapOf("sz000001" to 10.5, "sh600519" to 1500.0))
+        val vm = StockViewModel(api = api)
+        vm.addStock(QuoteResult("000001", "平安银行", 9.0, "sz"))
+        vm.addStock(QuoteResult("600519", "贵州茅台", 1400.0, "sh"))
+        vm.refreshAll()
+        await { vm.state.value.message?.contains("已刷新全部") == true }
+        val s = vm.state.value
+        assertEquals(10.5, s.accounts[0].currentPrice!!, 0.0001)
+        assertEquals(1500.0, s.accounts[1].currentPrice!!, 0.0001)
+    }
+
+    @Test
+    fun 一键刷新全部_部分失败只更新成功的() {
+        val api = FakeApi(prices = mapOf("sz000001" to 10.5))
+        val vm = StockViewModel(api = api)
+        vm.addStock(QuoteResult("000001", "平安银行", 9.0, "sz"))
+        vm.addStock(QuoteResult("600519", "贵州茅台", 1400.0, "sh"))
+        vm.refreshAll()
+        await { vm.state.value.message?.contains("1/2") == true }
+        val s = vm.state.value
+        assertEquals(10.5, s.accounts[0].currentPrice!!, 0.0001)
+        assertEquals(1400.0, s.accounts[1].currentPrice!!, 0.0001) // 刷新失败保留旧价
     }
 }

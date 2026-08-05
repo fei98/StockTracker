@@ -70,6 +70,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.stocktracker.QuoteResult
 import com.example.stocktracker.PrefsStorage
 import com.example.stocktracker.StockAccount
+import com.example.stocktracker.StockState
 import com.example.stocktracker.StockViewModel
 import com.example.stocktracker.TradeType
 import com.example.stocktracker.formatMoney
@@ -131,8 +132,8 @@ fun StockApp() {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 contentPadding = PaddingValues(vertical = 8.dp)
             ) {
-                item {
-                    if (state.accounts.isEmpty()) {
+                if (state.accounts.isEmpty()) {
+                    item {
                         OutlinedButton(
                             onClick = { showAddDialog = true },
                             modifier = Modifier.fillMaxWidth()
@@ -141,7 +142,10 @@ fun StockApp() {
                             Spacer(Modifier.width(6.dp))
                             Text("添加股票（输入代码自动查询名称）")
                         }
-                    } else {
+                    }
+                } else {
+                    item { AccountPnlBar(state, onRefreshAll = vm::refreshAll) }
+                    item {
                         StockBar(
                             accounts = state.accounts,
                             selectedIndex = state.selectedIndex,
@@ -322,6 +326,45 @@ private fun AddStockDialog(
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )
 }
+
+// ---------------- 账户总盈亏条（点击一键刷新全部行情） ----------------
+@Composable
+private fun AccountPnlBar(s: StockState, onRefreshAll: () -> Unit) {
+    val color = pnlColor(s.totalPnl)
+    val floatingText = if (s.hasAnyPrice) signedMoney(s.floatingPnl) else "—"
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onRefreshAll)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("账户总盈亏", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            Spacer(Modifier.weight(1f))
+            Text(signedMoney(s.totalPnl), color = color, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "浮动 ${floatingText} · 已实现 ${signedMoney(s.realizedPnl)}",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+            )
+            Spacer(Modifier.width(6.dp))
+            Icon(
+                Icons.Default.Refresh,
+                contentDescription = "一键刷新全部行情",
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
+        }
+    }
+}
+
+@Composable
+private fun signedMoney(v: Double): String = if (v >= 0) "+${formatMoney(v)}" else formatMoney(v)
 
 // ---------------- 概览卡片 ----------------
 @Composable

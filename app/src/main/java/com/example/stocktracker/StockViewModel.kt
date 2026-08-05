@@ -3,6 +3,8 @@ package com.example.stocktracker
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -120,6 +122,30 @@ class StockViewModel(
                     accounts = updateSelected(s) { it.copy(currentPrice = price) },
                     message = "已刷新现价：${formatPrice(price)} 元"
                 )
+            }
+            persist()
+        }
+    }
+
+    /** 一键刷新所有股票的现价（并行请求），用于计算准确的账户总盈亏 */
+    fun refreshAll() {
+        val stocks = _state.value.accounts.map { it.stock }
+        if (stocks.isEmpty()) return
+        viewModelScope.launch {
+            val results = stocks.map { stock -> async { stock to api.fetchPrice(stock) } }.awaitAll()
+            val fetched = results.filter { it.second != null }
+            _state.update { s ->
+                if (fetched.isEmpty()) s.copy(message = "行情刷新失败，请检查网络")
+                else {
+                    val accounts = s.accounts.map { a ->
+                        val price = fetched.firstOrNull { it.first.code == a.stock.code && it.first.market == a.stock.market }?.second
+                        if (price != null) a.copy(currentPrice = price) else a
+                    }
+                    s.copy(
+                        accounts = accounts,
+                        message = "已刷新全部行情（${fetched.size}/${stocks.size} 只）"
+                    )
+                }
             }
             persist()
         }

@@ -136,6 +136,19 @@ data class StockState(
 ) {
     /** 当前选中的股票账户 */
     val selected: StockAccount? get() = accounts.getOrNull(selectedIndex)
+
+    /** 账户已实现盈亏：所有卖出记录的盈亏之和 */
+    val realizedPnl: Double
+        get() = accounts.flatMap { it.trades }.filter { it.type == TradeType.SELL }.sumOf { it.profit }
+
+    /** 账户浮动盈亏：各股票现价浮动盈亏之和（未设现价的股票按 0 计） */
+    val floatingPnl: Double get() = accounts.sumOf { it.totalPnl }
+
+    /** 账户总盈亏 = 浮动盈亏 + 已实现盈亏 */
+    val totalPnl: Double get() = floatingPnl + realizedPnl
+
+    /** 是否已为任意股票设置现价（用于浮动盈亏展示） */
+    val hasAnyPrice: Boolean get() = accounts.any { it.currentPrice != null }
 }
 
 private val timeFormat = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())

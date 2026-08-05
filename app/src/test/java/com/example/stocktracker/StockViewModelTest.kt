@@ -566,6 +566,36 @@ class StockViewModelTest {
     }
 
     @Test
+    fun 账户总盈亏_浮动加已实现之和() {
+        val vm = newVm()
+        vm.addStock(quote("000001", "平安银行"))
+        vm.buy(3.0, 100, time = yesterday)
+        vm.setCurrentPrice(3.3) // 浮动 +30
+        vm.addStock(quote("600519", "贵州茅台"))
+        vm.buy(2.0, 100, time = yesterday)
+        vm.sell(2.5, 50)        // 已实现 +25
+        vm.setCurrentPrice(2.2) // 浮动 (2.2-2)*50 = +10
+        val s = vm.state.value
+        assertEquals(30.0, s.accounts[0].totalPnl, 0.0001)
+        assertEquals(10.0, s.accounts[1].totalPnl, 0.0001)
+        assertEquals(40.0, s.floatingPnl, 0.0001)
+        assertEquals(25.0, s.realizedPnl, 0.0001)
+        assertEquals(65.0, s.totalPnl, 0.0001)
+        assertEquals(true, s.hasAnyPrice)
+    }
+
+    @Test
+    fun 账户总盈亏_全未设现价_浮动为零() {
+        val vm = vmWithBuys(3.0 to 100)
+        vm.sell(3.5, 100) // 已实现 +50
+        val s = vm.state.value
+        assertEquals(false, s.hasAnyPrice)
+        assertEquals(0.0, s.floatingPnl, 0.0001)
+        assertEquals(50.0, s.realizedPnl, 0.0001)
+        assertEquals(50.0, s.totalPnl, 0.0001)
+    }
+
+    @Test
     fun 消息_会随下次操作被覆盖() {
         val vm = vmWithStock()
         vm.buy(3.0, 100)
