@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -21,7 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -32,6 +33,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -62,6 +64,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.clickable
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.stocktracker.QuoteResult
@@ -88,9 +91,13 @@ fun StockApp() {
         StockViewModel(PrefsStorage(context))
     }
     val state by vm.state.collectAsStateWithLifecycle()
+    val acc = state.selected
     val snackbar = remember { SnackbarHostState() }
     var showClearDialog by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
+    var showTradeDialog by remember { mutableStateOf(false) }
+    var showHistoryDialog by remember { mutableStateOf(false) }
+    var showPriceDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(state.message) {
         state.message?.let { msg ->
@@ -121,8 +128,8 @@ fun StockApp() {
                     .fillMaxSize()
                     .padding(padding)
                     .padding(horizontal = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                contentPadding = PaddingValues(vertical = 12.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(vertical = 8.dp)
             ) {
                 item {
                     if (state.accounts.isEmpty()) {
@@ -143,21 +150,56 @@ fun StockApp() {
                         )
                     }
                 }
-                val acc = state.selected
                 if (acc == null) {
                     // 无选中股票时只有添加按钮，无需其他提示
                 } else {
-                    item { SummaryCard(acc) }
                     item {
-                        CurrentPriceCard(acc.currentPrice, vm::setCurrentPrice, vm::refreshPrice)
+                        SummaryCard(
+                            acc,
+                            onEditPrice = { showPriceDialog = true },
+                            onRefresh = vm::refreshPrice
+                        )
                     }
-                    item { TradeCard(acc.sellableQty, vm::buy, vm::sell) }
                     item { HoldingsCard(acc) }
-                    item { HistoryCard(acc.trades) }
-                    item { ClearButton { showClearDialog = true } }
+                    item { HistoryPreviewCard(acc.trades) { showHistoryDialog = true } }
+                    item {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = { showTradeDialog = true },
+                                modifier = Modifier.weight(1f)
+                            ) { Text("交易", fontWeight = FontWeight.Bold) }
+                            OutlinedButton(
+                                onClick = { showClearDialog = true },
+                                modifier = Modifier.weight(1f)
+                            ) { Text("清空") }
+                        }
+                    }
                 }
             }
         }
+    }
+
+    if (showTradeDialog && acc != null) {
+        TradeDialog(
+            sellableQty = acc.sellableQty,
+            onBuy = vm::buy,
+            onSell = vm::sell,
+            onDismiss = { showTradeDialog = false }
+        )
+    }
+    if (showHistoryDialog && acc != null) {
+        HistoryDialog(acc.trades) { showHistoryDialog = false }
+    }
+    if (showPriceDialog) {
+        PriceDialog(
+            current = acc?.currentPrice,
+            onSet = vm::setCurrentPrice,
+            onRefresh = vm::refreshPrice,
+            onDismiss = { showPriceDialog = false }
+        )
     }
 
     if (showClearDialog) {
@@ -283,13 +325,27 @@ private fun AddStockDialog(
 
 // ---------------- 概览卡片 ----------------
 @Composable
-private fun SummaryCard(acc: StockAccount) {
+private fun SummaryCard(acc: StockAccount, onEditPrice: () -> Unit, onRefresh: () -> Unit) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primary)) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(
-                "持仓概览 · ${acc.stock.displayName}",
-                color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp
-            )
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "持仓概览 · ${acc.stock.displayName}",
+                    color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp,
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(onClick = onRefresh) {
+                    Icon(
+                        Icons.Default.Refresh,
+                        contentDescription = "刷新现价",
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 InfoCol("总持仓", "${acc.totalQty} 股")
                 InfoCol("可卖", "${acc.sellableQty} 股")
@@ -298,7 +354,27 @@ private fun SummaryCard(acc: StockAccount) {
             }
             HorizontalDivider(color = Color.White.copy(alpha = 0.25f))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                InfoCol("现价", acc.currentPrice?.let { "¥${formatPrice(it)}" } ?: "未设置")
+                Row(
+                    Modifier.clickable(onClick = onEditPrice),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("现价", color = Color.White.copy(alpha = 0.8f), fontSize = 11.sp)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                acc.currentPrice?.let { "¥${formatPrice(it)}" } ?: "未设置",
+                                color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp
+                            )
+                            Icon(
+                                Icons.Default.Edit,
+                                contentDescription = "设置现价",
+                                modifier = Modifier.size(12.dp).padding(start = 2.dp),
+                                tint = Color.White.copy(alpha = 0.7f)
+                            )
+                        }
+                    }
+                }
                 InfoCol("市值", if (acc.currentPrice != null) "¥${formatMoney(acc.marketValue)}" else "—")
                 InfoCol(
                     "浮动盈亏",
@@ -322,216 +398,277 @@ private fun InfoCol(label: String, value: String, valueColor: Color = Color.Whit
     }
 }
 
-// ---------------- 现价卡片（紧凑） ----------------
+// ---------------- 设置现价弹窗 ----------------
 @Composable
-private fun CurrentPriceCard(current: Double?, onSet: (Double?) -> Unit, onRefresh: () -> Unit) {
+private fun PriceDialog(
+    current: Double?,
+    onSet: (Double?) -> Unit,
+    onRefresh: () -> Unit,
+    onDismiss: () -> Unit
+) {
     var text by remember { mutableStateOf("") }
-    SectionCard(title = "现价（计算浮动盈亏）") {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                value = text,
-                onValueChange = { t -> text = t.filter { c -> c.isDigit() || c == '.' } },
-                label = { Text("现价") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                modifier = Modifier.weight(1f)
-            )
-            Spacer(Modifier.width(6.dp))
-            Button(onClick = { text.toDoubleOrNull()?.let { onSet(it) } }) { Text("更新") }
-            Spacer(Modifier.width(4.dp))
-            TextButton(onClick = onRefresh) {
-                Icon(Icons.Default.Refresh, contentDescription = null, Modifier.size(16.dp))
-                Spacer(Modifier.width(2.dp))
-                Text("刷新")
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("设置现价") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { t -> text = t.filter { c -> c.isDigit() || c == '.' } },
+                    label = { Text("现价（计算浮动盈亏）") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(4.dp))
+                HintText("当前现价：${current?.let { "¥${formatPrice(it)}" } ?: "未设置"}")
+                Spacer(Modifier.height(8.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = { onRefresh(); onDismiss() },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("刷新")
+                    }
+                    OutlinedButton(
+                        onClick = { onSet(null); onDismiss() },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("清除") }
+                }
             }
-            TextButton(onClick = { text = ""; onSet(null) }) { Text("清除") }
-        }
-    }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                text.toDoubleOrNull()?.let { onSet(it) }
+                onDismiss()
+            }) { Text("更新") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
 }
 
-// ---------------- 交易卡片（买入/卖出切换） ----------------
+// ---------------- 交易弹窗（买入/卖出） ----------------
 @Composable
-private fun TradeCard(sellableQty: Int, onBuy: (Double, Int) -> Unit, onSell: (Double, Int) -> Unit) {
+private fun TradeDialog(
+    sellableQty: Int,
+    onBuy: (Double, Int) -> Unit,
+    onSell: (Double, Int) -> Unit,
+    onDismiss: () -> Unit
+) {
     var isBuy by remember { mutableStateOf(true) }
     var price by remember { mutableStateOf("") }
     var qty by remember { mutableStateOf("") }
     val btnColor = if (isBuy) UpColor else DownColor
 
-    SectionCard(title = "交易") {
-        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-            SegmentedButton(
-                selected = isBuy,
-                onClick = { isBuy = true },
-                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                colors = SegmentedButtonDefaults.colors(
-                    activeContainerColor = if (isBuy) UpColor else MaterialTheme.colorScheme.secondaryContainer,
-                    activeContentColor = if (isBuy) Color.White else MaterialTheme.colorScheme.onSecondaryContainer
-                )
-            ) { Text("买入") }
-            SegmentedButton(
-                selected = !isBuy,
-                onClick = { isBuy = false },
-                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                colors = SegmentedButtonDefaults.colors(
-                    activeContainerColor = if (!isBuy) DownColor else MaterialTheme.colorScheme.secondaryContainer,
-                    activeContentColor = if (!isBuy) Color.White else MaterialTheme.colorScheme.onSecondaryContainer
-                )
-            ) { Text("卖出") }
-        }
-        if (!isBuy) {
-            Spacer(Modifier.height(4.dp))
-            HintText(
-                if (sellableQty > 0) "可卖 $sellableQty 股（当日买入的部分 T+1 冻结）"
-                else "今日买入的股票需 T+1，次日才能卖出"
-            )
-        }
-        Spacer(Modifier.height(10.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                value = price,
-                onValueChange = { t -> price = t.filter { c -> c.isDigit() || c == '.' } },
-                label = { Text("单价(元)") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                modifier = Modifier.weight(1f)
-            )
-            Spacer(Modifier.width(8.dp))
-            OutlinedTextField(
-                value = qty,
-                onValueChange = { t -> qty = t.filter { c -> c.isDigit() } },
-                label = { Text("数量(股)") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.weight(1f)
-            )
-        }
-        Spacer(Modifier.height(10.dp))
-        Button(
-            onClick = {
-                val p = price.toDoubleOrNull(); val q = qty.toIntOrNull()
-                if (p != null && q != null) {
-                    if (isBuy) onBuy(p, q) else onSell(p, q)
-                    price = ""; qty = ""
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("交易") },
+        text = {
+            Column {
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    SegmentedButton(
+                        selected = isBuy,
+                        onClick = { isBuy = true },
+                        shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                        colors = SegmentedButtonDefaults.colors(
+                            activeContainerColor = if (isBuy) UpColor else MaterialTheme.colorScheme.secondaryContainer,
+                            activeContentColor = if (isBuy) Color.White else MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                    ) { Text("买入") }
+                    SegmentedButton(
+                        selected = !isBuy,
+                        onClick = { isBuy = false },
+                        shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                        colors = SegmentedButtonDefaults.colors(
+                            activeContainerColor = if (!isBuy) DownColor else MaterialTheme.colorScheme.secondaryContainer,
+                            activeContentColor = if (!isBuy) Color.White else MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                    ) { Text("卖出") }
                 }
-            },
-            colors = ButtonDefaults.buttonColors(containerColor = btnColor),
-            modifier = Modifier.fillMaxWidth()
-        ) { Text(if (isBuy) "买入" else "卖出", fontWeight = FontWeight.Bold) }
-    }
+                if (!isBuy) {
+                    Spacer(Modifier.height(4.dp))
+                    HintText(
+                        if (sellableQty > 0) "可卖 $sellableQty 股（当日买入的部分 T+1 冻结）"
+                        else "今日买入的股票需 T+1，次日才能卖出"
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = price,
+                        onValueChange = { t -> price = t.filter { c -> c.isDigit() || c == '.' } },
+                        label = { Text("单价(元)") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    OutlinedTextField(
+                        value = qty,
+                        onValueChange = { t -> qty = t.filter { c -> c.isDigit() } },
+                        label = { Text("数量(股)") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                Button(
+                    onClick = {
+                        val p = price.toDoubleOrNull(); val q = qty.toIntOrNull()
+                        if (p != null && q != null) {
+                            if (isBuy) onBuy(p, q) else onSell(p, q)
+                            price = ""; qty = ""
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = btnColor),
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text(if (isBuy) "买入" else "卖出", fontWeight = FontWeight.Bold) }
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        confirmButton = {}
+    )
 }
 
 // ---------------- 持仓明细卡片 ----------------
 @Composable
-private fun HoldingsCard(acc: com.example.stocktracker.StockAccount) {
+private fun HoldingsCard(acc: StockAccount) {
     val lots = acc.lotPnls
     val sellableIds = acc.sellableHoldings.map { it.id }.toSet()
-    SectionCard(title = "持仓明细（T+1：当日买入不可卖）") {
+    SectionCard(title = "持仓明细") {
         if (lots.isEmpty()) {
             EmptyText("暂无持仓")
         } else {
             lots.sortedByDescending { it.lot.price }.forEach { lp ->
-                val lot = lp.lot
-                val frozen = lot.id !in sellableIds
-                Row(
-                    Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text("¥${formatPrice(lot.price)} 买入", fontWeight = FontWeight.Medium)
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("剩余 ${lot.remainingQty} 股", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
-                            Spacer(Modifier.width(6.dp))
-                            if (frozen) {
-                                Box(
-                                    Modifier
-                                        .background(Color(0xFFF9A825).copy(alpha = 0.15f), RoundedCornerShape(4.dp))
-                                        .padding(horizontal = 5.dp, vertical = 1.dp)
-                                ) {
-                                    Text(
-                                        "今日买入 · T+1冻结",
-                                        color = Color(0xFFF9A825),
-                                        fontSize = 10.sp, fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            } else {
-                                Text("可卖", fontSize = 11.sp, color = UpColor)
-                            }
-                        }
-                    }
-                    val pctText = if (acc.currentPrice != null) String.format("%.2f%%", lp.pnlPercent) else "—"
-                    Text(
-                        if (acc.currentPrice != null) "${if (lp.pnl >= 0) "+" else ""}${formatMoney(lp.pnl)} 元 ($pctText)" else "—",
-                        color = pnlColor(lp.pnl), fontWeight = FontWeight.Bold
-                    )
-                }
+                LotRow(lp, acc.currentPrice, lp.lot.id !in sellableIds)
                 HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
             }
         }
     }
 }
 
-// ---------------- 交易记录卡片 ----------------
 @Composable
-private fun HistoryCard(trades: List<com.example.stocktracker.TradeRecord>) {
+private fun LotRow(lp: com.example.stocktracker.LotPnl, currentPrice: Double?, frozen: Boolean) {
+    val lot = lp.lot
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column {
+            Text("¥${formatPrice(lot.price)} 买入", fontWeight = FontWeight.Medium)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("剩余 ${lot.remainingQty} 股", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                Spacer(Modifier.width(6.dp))
+                if (frozen) {
+                    Box(
+                        Modifier
+                            .background(Color(0xFFF9A825).copy(alpha = 0.15f), RoundedCornerShape(4.dp))
+                            .padding(horizontal = 5.dp, vertical = 1.dp)
+                    ) {
+                        Text(
+                            "今日买入 · T+1冻结",
+                            color = Color(0xFFF9A825),
+                            fontSize = 10.sp, fontWeight = FontWeight.Bold
+                        )
+                    }
+                } else {
+                    Text("可卖", fontSize = 11.sp, color = UpColor)
+                }
+            }
+        }
+        val pctText = if (currentPrice != null) String.format("%.2f%%", lp.pnlPercent) else "—"
+        Text(
+            if (currentPrice != null) "${if (lp.pnl >= 0) "+" else ""}${formatMoney(lp.pnl)} 元 ($pctText)" else "—",
+            color = pnlColor(lp.pnl), fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+// ---------------- 交易记录预览卡片（最多 3 条，更多进弹窗） ----------------
+@Composable
+private fun HistoryPreviewCard(trades: List<com.example.stocktracker.TradeRecord>, onShowAll: () -> Unit) {
     SectionCard(title = "交易记录") {
         if (trades.isEmpty()) {
             EmptyText("暂无交易")
         } else {
-            trades.reversed().forEach { t ->
-                Row(
-                    Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                Modifier
-                                    .background(
-                                        if (t.type == TradeType.BUY) UpColor.copy(alpha = 0.15f) else DownColor.copy(alpha = 0.15f),
-                                        RoundedCornerShape(4.dp)
-                                    )
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                            ) {
-                                Text(
-                                    if (t.type == TradeType.BUY) "买入" else "卖出",
-                                    color = if (t.type == TradeType.BUY) UpColor else DownColor,
-                                    fontSize = 11.sp, fontWeight = FontWeight.Bold
-                                )
-                            }
-                            Spacer(Modifier.width(8.dp))
-                            Text("¥${formatPrice(t.price)} × ${t.qty}股", fontWeight = FontWeight.Medium)
-                        }
-                        Text(formatTime(t.time), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
-                    }
-                    if (t.type == TradeType.SELL) {
-                        Text(
-                            "${if (t.profit >= 0) "+" else ""}${formatMoney(t.profit)}",
-                            color = pnlColor(t.profit), fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
+            trades.reversed().take(3).forEach { t ->
+                TradeRow(t)
                 HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
             }
+            if (trades.size > 3) {
+                TextButton(
+                    onClick = onShowAll,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("查看全部 ${trades.size} 条") }
+            }
+        }
+    }
+}
+
+// ---------------- 交易记录弹窗（全部） ----------------
+@Composable
+private fun HistoryDialog(trades: List<com.example.stocktracker.TradeRecord>, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("交易记录") },
+        text = {
+            if (trades.isEmpty()) {
+                EmptyText("暂无交易")
+            } else {
+                LazyColumn(Modifier.heightIn(max = 360.dp)) {
+                    items(trades.reversed()) { t ->
+                        TradeRow(t)
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+    )
+}
+
+@Composable
+private fun TradeRow(t: com.example.stocktracker.TradeRecord) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier
+                        .background(
+                            if (t.type == TradeType.BUY) UpColor.copy(alpha = 0.15f) else DownColor.copy(alpha = 0.15f),
+                            RoundedCornerShape(4.dp)
+                        )
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        if (t.type == TradeType.BUY) "买入" else "卖出",
+                        color = if (t.type == TradeType.BUY) UpColor else DownColor,
+                        fontSize = 11.sp, fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Text("¥${formatPrice(t.price)} × ${t.qty}股", fontWeight = FontWeight.Medium)
+            }
+            Text(formatTime(t.time), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+        }
+        if (t.type == TradeType.SELL) {
+            Text(
+                "${if (t.profit >= 0) "+" else ""}${formatMoney(t.profit)}",
+                color = pnlColor(t.profit), fontWeight = FontWeight.Bold
+            )
         }
     }
 }
 
 // ---------------- 一键清空 ----------------
-@Composable
-private fun ClearButton(onClick: () -> Unit) {
-    Button(
-        onClick = onClick,
-        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.errorContainer),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Icon(Icons.Default.DeleteSweep, contentDescription = null)
-        Spacer(Modifier.width(6.dp))
-        Text("一键清空数据", color = MaterialTheme.colorScheme.onErrorContainer)
-    }
-}
-
 @Composable
 private fun ClearDialog(onClearSelected: () -> Unit, onClearAll: () -> Unit, onDismiss: () -> Unit) {
     AlertDialog(
