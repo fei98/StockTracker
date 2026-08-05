@@ -140,4 +140,8 @@ fun formatMoney(v: Double): String {
     return if (v < 0) "-$s" else s
 }
 
-fun formatPrice(v: Double): String = String.format(Locale.US, "%.2f", v)
+/** 价格显示：最多保留 3 位小数，自动去掉末尾多余的 0（如 10.5、3.415、10） */
+fun formatPrice(v: Double): String {
+    val s = String.format(Locale.US, "%.3f", v)
+    return if (s.contains('.')) s.trimEnd('0').trimEnd('.') else s
+}

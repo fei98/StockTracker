@@ -114,6 +114,25 @@ class StockViewModelTest {
     }
 
     @Test
+    fun 买入_三位小数价格_显示与计算精确() {
+        val vm = vmWithBuys(3.415 to 100)
+        val acc = vm.state.value.selected!!
+        assertEquals(341.5, acc.totalCost, 0.0001)
+        assertEquals(3.415, acc.avgPrice, 0.0001)
+        // 交易记录里的价格显示保留三位
+        assertEquals("3.415", formatPrice(acc.trades.last().price))
+        assertTrue(vm.state.value.message!!.contains("3.415"))
+    }
+
+    @Test
+    fun 价格格式化_去尾零() {
+        assertEquals("3.415", formatPrice(3.415))
+        assertEquals("10.5", formatPrice(10.5))
+        assertEquals("10", formatPrice(10.0))
+        assertEquals("0.001", formatPrice(0.001))
+    }
+
+    @Test
     fun 买入_边界值极小_零_负数_均被拒绝() {
         val vm = vmWithStock()
         vm.buy(0.0, 100)
@@ -530,7 +549,7 @@ class StockViewModelTest {
         val vm = vmWithStock()
         vm.buy(3.0, 100)
         vm.buy(2.0, 100)
-        assertTrue(vm.state.value.message!!.contains("2.00"))
+        assertTrue(vm.state.value.message!!.contains("2 元"))
     }
 
     // ---------------- T+1 可卖规则 ----------------
