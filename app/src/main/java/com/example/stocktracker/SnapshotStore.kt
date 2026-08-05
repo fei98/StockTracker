@@ -153,6 +153,10 @@ private fun buildFactors(f: PredictionFactors): JSONObject =
         .put("endMovePct", f.endMovePct ?: JSONObject.NULL)
         .put("volZ", f.volZ ?: JSONObject.NULL)
         .put("baselineDays", f.baselineDays)
+        .put("momentum5dPct", f.momentum5dPct ?: JSONObject.NULL)
+        .put("prevDayPct", f.prevDayPct ?: JSONObject.NULL)
+        .put("upStreak", f.upStreak ?: JSONObject.NULL)
+        .put("trendDevPct", f.trendDevPct ?: JSONObject.NULL)
 
 private fun parseFactors(o: JSONObject): PredictionFactors = PredictionFactors(
     targetGapPct = if (o.isNull("targetGapPct")) null else o.getDouble("targetGapPct"),
@@ -162,12 +166,20 @@ private fun parseFactors(o: JSONObject): PredictionFactors = PredictionFactors(
     externalAvg = if (o.isNull("externalAvg")) null else o.getDouble("externalAvg"),
     endMovePct = if (o.isNull("endMovePct")) null else o.getDouble("endMovePct"),
     volZ = if (o.isNull("volZ")) null else o.getDouble("volZ"),
-    baselineDays = o.getInt("baselineDays")
+    baselineDays = o.getInt("baselineDays"),
+    momentum5dPct = if (o.isNull("momentum5dPct")) null else o.getDouble("momentum5dPct"),
+    prevDayPct = if (o.isNull("prevDayPct")) null else o.getDouble("prevDayPct"),
+    upStreak = if (o.isNull("upStreak")) null else o.getInt("upStreak"),
+    trendDevPct = if (o.isNull("trendDevPct")) null else o.getDouble("trendDevPct")
 )
 
 private fun buildSf(sf: StandardizedFactors): JSONObject =
-    JSONObject().put("strengthZ", sf.strengthZ)
+    JSONObject().put("strengthRaw", sf.strengthRaw ?: JSONObject.NULL)
+        .put("strengthMean", sf.strengthMean ?: JSONObject.NULL)
+        .put("strengthStd", sf.strengthStd ?: JSONObject.NULL)
         .put("endMoveZ", sf.endMoveZ ?: JSONObject.NULL)
+        .put("momentumZ", sf.momentumZ)
+        .put("streakZ", sf.streakZ)
         .put("breadth", sf.breadth ?: JSONObject.NULL)
         .put("extUpContrib", sf.extUpContrib)
         .put("extDownContrib", sf.extDownContrib)
@@ -178,8 +190,12 @@ private fun parseSf(o: JSONObject): StandardizedFactors {
     val arr = o.optJSONArray("insufficient")
     val ins = (0 until (arr?.length() ?: 0)).map { arr.getString(it) }
     return StandardizedFactors(
-        strengthZ = o.getDouble("strengthZ"),
+        strengthRaw = if (o.isNull("strengthRaw")) null else o.getDouble("strengthRaw"),
+        strengthMean = if (o.isNull("strengthMean")) null else o.getDouble("strengthMean"),
+        strengthStd = if (o.isNull("strengthStd")) null else o.getDouble("strengthStd"),
         endMoveZ = if (o.isNull("endMoveZ")) null else o.getDouble("endMoveZ"),
+        momentumZ = o.optDouble("momentumZ", 0.0),
+        streakZ = o.optDouble("streakZ", 0.0),
         breadth = if (o.isNull("breadth")) null else o.getDouble("breadth"),
         extUpContrib = o.getDouble("extUpContrib"),
         extDownContrib = o.getDouble("extDownContrib"),
@@ -191,11 +207,15 @@ private fun parseSf(o: JSONObject): StandardizedFactors {
 private fun buildWeights(w: CalibratedWeights): JSONObject =
     JSONObject().put("strengthScale", w.strengthScale).put("endScale", w.endScale)
         .put("breadthScale", w.breadthScale).put("extUpScale", w.extUpScale)
-        .put("extDownScale", w.extDownScale).put("threshold", w.threshold)
+        .put("extDownScale", w.extDownScale).put("momentumScale", w.momentumScale)
+        .put("streakScale", w.streakScale).put("interactionScale", w.interactionScale)
+        .put("targetW", w.targetW).put("indexW", w.indexW).put("threshold", w.threshold)
 
 private fun parseWeights(o: JSONObject): CalibratedWeights = CalibratedWeights(
     o.getDouble("strengthScale"), o.getDouble("endScale"), o.getDouble("breadthScale"),
-    o.getDouble("extUpScale"), o.getDouble("extDownScale"), o.getDouble("threshold")
+    o.getDouble("extUpScale"), o.getDouble("extDownScale"), o.getDouble("momentumScale"),
+    o.getDouble("streakScale"), o.optDouble("interactionScale", 0.5),
+    o.optDouble("targetW", 0.5), o.optDouble("indexW", 0.25), o.getDouble("threshold")
 )
 
 private fun buildOutcome(o: PredictionOutcome?): Any = o?.name ?: JSONObject.NULL

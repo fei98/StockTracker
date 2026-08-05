@@ -493,6 +493,14 @@ private fun PredictionDetailDialog(
                     item { DetailRow("隔夜美股", result.factors.externalAvg?.let { signedPct(it) } ?: "—") }
                     item { DetailRow("竞价末端上移", result.factors.endMovePct?.let { signedPct(it) } ?: "无基准快照") }
                     item { DetailRow("放量 z-score", result.factors.volZ?.let { String.format("%.2f", it) } ?: "数据积累中") }
+                    item { DetailRow("5日动量", result.factors.momentum5dPct?.let { signedPct(it) } ?: "数据积累中") }
+                    item {
+                        DetailRow(
+                            "连阳/连阴",
+                            result.factors.upStreak?.let { if (it > 0) "连涨 $it 天" else "连跌 ${-it} 天" } ?: "—"
+                        )
+                    }
+                    item { DetailRow("昨收偏差(20日线)", result.factors.trendDevPct?.let { signedPct(it) } ?: "—") }
                     if (result.insufficient.isNotEmpty()) {
                         item { Text(result.insufficient.joinToString("；"), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)) }
                     }

@@ -193,6 +193,50 @@ class PredictionEngineTest {
     }
 
     @org.junit.Test
+    fun 投票序列_缓存一致且记录变化后重算() = runTest {
+        val store = FakeSnapshotStore()
+        storeWithBaseline(store)
+        val engine = PredictionEngine(snapOf(MarketSnapshot(quote(), null, emptyList(), emptyList())), store)
+        // 积累 25 天记录并回填结果
+        repeat(25) { d ->
+            val day = "2026-06-${d + 1}"
+            engine.runPrediction(etf, false, day, timeAt(10, 0))
+            store.updateOutcomes(etf.marketCode, day, PredictionOutcome.UP, PredictionOutcome.UP, PredictionOutcome.UP)
+        }
+        val s1 = engine.votedSeries(etf, date)
+        val s2 = engine.votedSeries(etf, date)   // 命中缓存，结果一致
+        assertEquals(s1, s2)
+        assertTrue(s1.isNotEmpty())
+        // 记录变化 → 缓存失效重算（不抛错、规模一致）
+        store.updateOutcomes(etf.marketCode, "2026-06-10", PredictionOutcome.DOWN, null, null)
+        val s3 = engine.votedSeries(etf, date)
+        assertEquals(s1.size, s3.size)
+    }
+
+    @org.junit.Test
+    fun 动量因子_从收盘快照计算() = runTest {        val store = FakeSnapshotStore()
+        storeWithBaseline(store)
+        // 21 天收盘价：从 3.0 稳步上涨到 3.84（每天 +4%），最近 5 日从 3.2→3.84
+        var price = 3.0
+        for (d in 1..21) {
+            store.updateClose(etf.marketCode, "close-d$d", 0.0, 0.0) // 无操作
+            store.addSnapshot(etf.marketCode, DailySnapshot("2026-07-$d", price, price - 0.1, 1000.0, 5000.0, price))
+            price *= 1.04
+        }
+        // 收盘价序列：close 为 3.0..3.84 递增 → 连涨 21 天
+        val api = snapOf(MarketSnapshot(quote(), null, emptyList(), emptyList()))
+        val engine = PredictionEngine(api, store)
+        val result = engine.runPrediction(etf, false, date, morning)!!
+        val f = result.factors
+        assertNotNull(f.momentum5dPct)          // 5 日动量有值
+        assertNotNull(f.upStreak)
+        assertTrue(f.upStreak!! >= 20)           // 连涨
+        assertNotNull(f.trendDevPct)             // 20 日线偏差有值
+        assertTrue(f.trendDevPct!! > 0)          // 价格在 20 日线上方
+        assertNotNull(f.prevDayPct)
+    }
+
+    @org.junit.Test
     fun 多股票_基线记录快照互相隔离() = runTest {
         val store = FakeSnapshotStore()
         storeWithBaseline(store, etf.marketCode)

@@ -15,6 +15,12 @@ class PredictionEngine(
     private val store: SnapshotStore
 ) {
 
+    /** walk-forward 结果缓存（按股票 + 记录内容签名），避免详情弹窗反复重算 O(n²) */
+    private val wfCache = mutableMapOf<String, Pair<Int, Map<TargetType, WalkForwardStats>>>()
+
+    /** 投票前推序列缓存（按股票 + 记录内容签名），避免每次预测重算 O(n³) */
+    private val votedCache = mutableMapOf<String, Pair<Int, List<WFPoint>>>()
+
     companion object {
         const val STAGE_INTENT = "INTENT"   // 9:18（9:15–9:20 意图，不进公式）
         const val STAGE_BASE = "BASE"       // 9:20（不可撤单窗口基准）
@@ -71,6 +77,32 @@ class PredictionEngine(
             stats?.let { (target.amountWan - it.first) / it.second }
         } else null
 
+        // 前期趋势状态：从已回填收盘价的快照计算（当日快照尚未生成，天然只用历史）
+        val closes = history.filter { it.close > 0 }
+        val momentum5d = if (closes.size >= 6) {
+            val base5 = closes[closes.size - 6].close
+            if (base5 > 0) (closes.last().close - base5) / base5 * 100 else null
+        } else null
+        val prevDayPct = if (closes.size >= 2 && closes[closes.size - 2].close > 0) {
+            (closes.last().close - closes[closes.size - 2].close) / closes[closes.size - 2].close * 100
+        } else null
+        var upStreak: Int? = null
+        if (closes.size >= 2) {
+            val last = closes.last().close
+            val prev = closes[closes.size - 2].close
+            val sign = if (last >= prev) 1 else -1
+            var streak = 1
+            for (k in closes.size - 2 downTo 1) {
+                val up = closes[k].close >= closes[k - 1].close
+                if (up == (sign > 0)) streak++ else break
+            }
+            upStreak = streak * sign
+        }
+        val trendDev = if (closes.size >= 20) {
+            val ma20 = closes.takeLast(20).map { it.close }.average()
+            if (ma20 > 0) (closes.last().close - ma20) / ma20 * 100 else null
+        } else null
+
         val factors = PredictionFactors(
             targetGapPct = target.pct,
             indexGapPct = snap.indexPct,
@@ -79,25 +111,50 @@ class PredictionEngine(
             externalAvg = externalAvg,
             endMovePct = endMove,
             volZ = volZ,
-            baselineDays = history.size
+            baselineDays = history.size,
+            momentum5dPct = momentum5d,
+            prevDayPct = prevDayPct,
+            upStreak = upStreak,
+            trendDevPct = trendDev
         )
 
         // 标定（只用该股当日之前的数据）
-        val strengthHistory = records.mapNotNull { AuctionPredictor.combinedStrength(it.factors) }
+        // 三目标各自标定权重（8.1 投票）
+        val weightsByTarget = Calibrator.VOTE_WEIGHTS.keys.associateWith { t ->
+            Calibrator.liveWeights(records, t)
+        }
+        // strengthHistory 按各目标权重计算（消除 DEFAULT 权重统计偏差，评审中优先级）
+        val strengthHistoryByTarget = Calibrator.VOTE_WEIGHTS.keys.associateWith { t ->
+            val w = weightsByTarget[t]!!
+            records.mapNotNull { AuctionPredictor.combinedStrength(it.factors, w) }
+        }
         val endMoveHistory = records.mapNotNull { it.factors.endMovePct }
-        val (extUp, extDown) = Calibrator.externalContribs(records, LIVE_TARGET, externalAvg)
-        val sf = AuctionPredictor.standardize(factors, strengthHistory, endMoveHistory, extUp, extDown)
-        val series = Calibrator.walkForwardSeries(records, LIVE_TARGET)
-        val weights = Calibrator.liveWeights(records, LIVE_TARGET)
-        val threshold = Calibrator.curveThreshold(series, 0.60) ?: CalibratedWeights.DEFAULT.threshold
+        val momentumHistory = records.mapNotNull { it.factors.momentum5dPct }
 
-        val scoreRaw = AuctionPredictor.score(sf, weights)
+        val sfByTarget = Calibrator.VOTE_WEIGHTS.keys.associateWith { t ->
+            val (extUp, extDown) = Calibrator.externalContribs(records, t, externalAvg)
+            AuctionPredictor.standardize(
+                factors, strengthHistoryByTarget[t]!!, endMoveHistory, momentumHistory,
+                extUp, extDown, weightsByTarget[t]!!
+            )
+        }
+        val scoreByTarget = Calibrator.VOTE_WEIGHTS.keys.associateWith { t ->
+            AuctionPredictor.score(sfByTarget[t]!!, weightsByTarget[t]!!)
+        }
+        // 加权投票分：主目标(收盘vs开盘)0.5 + 30分钟/全天各 0.25
+        val scoreRaw = Calibrator.VOTE_WEIGHTS.entries.sumOf { (t, v) -> v * scoreByTarget[t]!! }
+
+        // 阈值/信心/封顶用投票前推序列标定（实际结果以主目标判定，带缓存避免 O(n³) 重算）
+        val series = votedSeries(stock, date)
+        val threshold = Calibrator.curveThreshold(series) ?: CalibratedWeights.DEFAULT.threshold
         val cap = Calibrator.capDecision(series)
         val score = AuctionPredictor.applyCap(scoreRaw, cap)
         val conclusion = AuctionPredictor.classify(score, threshold)
         val confidence = Calibrator.confidence(series, score)
         val suggestion = AuctionPredictor.suggest(conclusion, hasPosition, score)
 
+        val weights = weightsByTarget[LIVE_TARGET]!!
+        val sf = sfByTarget[LIVE_TARGET]!!
         val result = PredictionResult(
             stockCode = key,
             stockName = stock.name,
@@ -142,11 +199,29 @@ class PredictionEngine(
         store.updateClose(key, date, price, quote.amountWan ?: 0.0)
     }
 
-    /** 该股各目标的前推回测统计（详情弹窗展示） */
+    /** 该股各目标的前推回测统计（详情弹窗展示，带缓存） */
     fun walkForwardStats(stock: Stock, date: String): Map<TargetType, WalkForwardStats> {
-        val records = store.loadRecords(stock.marketCode).filter { it.date != date }
-        return TargetType.entries.associateWith { t ->
+        val key = stock.marketCode
+        val records = store.loadRecords(key).filter { it.date != date }
+        val sig = records.hashCode() // 数据类内容签名，记录变化即失效
+        val cached = wfCache[key]
+        if (cached != null && cached.first == sig) return cached.second
+        val stats = TargetType.entries.associateWith { t ->
             Calibrator.statsOf(Calibrator.walkForwardSeries(records, t))
         }
+        wfCache[key] = sig to stats
+        return stats
+    }
+
+    /** 投票前推序列（阈值/信心/封顶标定用，带缓存；记录变化即失效） */
+    fun votedSeries(stock: Stock, date: String): List<WFPoint> {
+        val key = stock.marketCode
+        val records = store.loadRecords(key).filter { it.date != date }
+        val sig = records.hashCode()
+        val cached = votedCache[key]
+        if (cached != null && cached.first == sig) return cached.second
+        val series = Calibrator.walkForwardVotedSeries(records)
+        votedCache[key] = sig to series
+        return series
     }
 }

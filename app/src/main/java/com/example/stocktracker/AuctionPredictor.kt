@@ -8,41 +8,58 @@ import kotlin.math.tanh
  */
 object AuctionPredictor {
 
-    // ---- 常量（定死，见方案评审） ----
+    // ---- 常量（定死，见方案评审；新因子回退除数纳入文档） ----
     const val FALLBACK_STRENGTH_DIV = 1.0   // <10 天回退：合成强度(百分点) ÷ 1.0
     const val FALLBACK_END_DIV = 0.7        // <10 天回退：末端移动(百分点) ÷ 0.7
+    const val FALLBACK_MOMENTUM_DIV = 3.0   // <10 天回退：5 日动量(百分点) ÷ 3.0
+    const val STREAK_DIV = 5.0              // 连阳/连阴比例缩放：streak ÷ 5.0（有界整数不做 z-score）
     const val MIN_STD_SAMPLES = 10          // 滚动 z 所需最少样本
     const val MAX_STD_SAMPLES = 40          // 滚动统计窗口上限
     const val EXT_BUCKET_BOUND = 0.5        // 外围三桶边界 ±0.5%（美股标的）
     const val EXT_MIN_SAMPLES = 15          // 外围桶条件概率所需最少样本
     const val VOL_Z_DIV = 1.5               // 放量放大器 tanh 除数
     const val VOL_AMP_MAX = 0.5             // 放量放大器上限
+    const val TREND_CTX_SCALE = 3.0         // 趋势情境调整：20日线偏差% 的 tanh 除数
+    const val TREND_CTX_MAX = 0.5           // 趋势情境调整上限（放大器乘数 ±50%）
+    const val PREVDAY_CTX_SCALE = 1.0       // 昨日涨跌幅% 的 tanh 除数（动量延续置信度）
+    const val PREVDAY_CTX_MAX = 0.5         // 昨日涨跌幅对动量的调制上限 ±50%
     const val BREADTH_RANGE = 2.0           // 广度贡献范围 ±2
-    const val TARGET_W = 0.5                // 合成强度权重：159915
-    const val INDEX_W = 0.25                // 合成强度权重：创业板指
-    const val SECTOR_W = 0.25               // 合成强度权重：权重股均值
+    const val BREADTH_GAP_CAP = 3.0         // 加权广度：单股涨幅幅度封顶（百分点，8.2）
+    const val TARGET_W = 0.5                // 合成强度默认权重：目标股（可搜索，见 CalibratedWeights）
+    const val INDEX_W = 0.25                // 合成强度默认权重：指数
+    const val SECTOR_W = 0.25               // 合成强度默认权重：板块均值
 
     // ---------------- 因子计算 ----------------
 
     /**
      * 合成强度（百分点，单单位）：
-     * combined = Σ(wᵢ·xᵢ) / Σwᵢ（仅有效字段，权重自动归一）；全缺失返回 null
+     * combined = Σ(wᵢ·xᵢ) / Σwᵢ（仅有效字段，权重自动归一）；全缺失返回 null。
+     * 权重来自 CalibratedWeights.targetW/indexW（sectorW = 1-两者），可被 walk-forward 搜索（8.3）。
      */
-    fun combinedStrength(f: PredictionFactors): Double? {
+    fun combinedStrength(f: PredictionFactors, w: CalibratedWeights = CalibratedWeights.DEFAULT): Double? {
         var sum = 0.0
         var wSum = 0.0
-        f.targetGapPct?.let { sum += TARGET_W * it; wSum += TARGET_W }
-        f.indexGapPct?.let { sum += INDEX_W * it; wSum += INDEX_W }
-        f.sectorAvgGap?.let { sum += SECTOR_W * it; wSum += SECTOR_W }
+        f.targetGapPct?.let { sum += w.targetW * it; wSum += w.targetW }
+        f.indexGapPct?.let { sum += w.indexW * it; wSum += w.indexW }
+        f.sectorAvgGap?.let { sum += w.sectorW * it; wSum += w.sectorW }
         return if (wSum == 0.0) null else sum / wSum
     }
 
-    /** 板块广度：(涨家 − 跌家) / 有效家数，-1..1；无有效标的返回 null */
+    /**
+     * 板块广度（加权化，8.2）：计方向并按幅度加权，龙头涨 5% 与涨 0.1% 不再等同。
+     * weightedBreadth = Σ(sign(g) × min(|g|, cap)) / Σ max(|g|, 1)，范围约 -1..1
+     */
     fun sectorBreadth(gaps: List<Double?>): Double? {
         val valid = gaps.filterNotNull()
         if (valid.isEmpty()) return null
-        return valid.count { it > 0.001 } * 1.0 / valid.size -
-            valid.count { it < -0.001 } * 1.0 / valid.size
+        var num = 0.0
+        var den = 0.0
+        valid.forEach { g ->
+            val capped = minOf(kotlin.math.abs(g), BREADTH_GAP_CAP)
+            num += if (g > 0) capped else -capped
+            den += maxOf(kotlin.math.abs(g), 1.0)
+        }
+        return if (den == 0.0) null else num / den
     }
 
     /** 末端移动（百分点）：(9:25 − 基准) / 基准 × 100 */
@@ -64,60 +81,89 @@ object AuctionPredictor {
 
     /**
      * 标准化（进公式前）：
-     * - strength：对合成强度做滚动 z；不足则领域除数回退（combined/1.0）
+     * - strength：存原始合成值与滚动均值/标准差（不足则 null → 评分时领域除数回退）；
+     *   合成权重取自 w（8.3 可搜索）
      * - endMove：滚动 z；不足则 ÷0.7；无基准快照 → null
-     * - vol：滚动 z（不足 → null → 放大器 0）
+     * - momentum：滚动 z；不足则领域除数回退；再用昨日涨跌幅做动量延续调制
+     * - streak：有界整数，比例缩放 streak ÷ 5.0
+     * - vol：滚动 z（不足 → null → 放大器 0）；放大器再乘趋势情境调整
      * - 外围：三桶条件概率由调用方（Calibrator）提供
      */
     fun standardize(
         f: PredictionFactors,
         strengthHistory: List<Double>,
         endMoveHistory: List<Double>,
+        momentumHistory: List<Double>,
         extUpContrib: Double,
-        extDownContrib: Double
+        extDownContrib: Double,
+        w: CalibratedWeights = CalibratedWeights.DEFAULT
     ): StandardizedFactors {
         val insufficient = mutableListOf<String>()
         if (f.baselineDays < MIN_STD_SAMPLES) insufficient += "放量基线积累中(${f.baselineDays}/${MIN_STD_SAMPLES}天)"
 
-        val combined = combinedStrength(f)
-        val strengthZ: Double
-        if (combined == null) {
-            strengthZ = 0.0
-            insufficient += "行情数据缺失"
-        } else {
-            val s = rollingStats(strengthHistory)
-            strengthZ = if (s != null) (combined - s.first) / s.second
-            else combined / FALLBACK_STRENGTH_DIV
-        }
+        val combined = combinedStrength(f, w)
+        if (combined == null) insufficient += "行情数据缺失"
+        val stats = strengthHistory.takeIf { combined != null }?.let { rollingStats(it) }
 
         val endMoveZ = f.endMovePct?.let { end ->
             val s = rollingStats(endMoveHistory)
             if (s != null) (end - s.first) / s.second else end / FALLBACK_END_DIV
         }
 
-        val volAmp = if (f.volZ != null) VOL_AMP_MAX * tanh(f.volZ / VOL_Z_DIV) else 0.0
+        val momentumRaw = f.momentum5dPct?.let { m ->
+            val s = rollingStats(momentumHistory)
+            if (s != null) (m - s.first) / s.second else m / FALLBACK_MOMENTUM_DIV
+        } ?: 0.0
+        if (f.momentum5dPct == null) insufficient += "动量因子缺失(需6个收盘日)"
+        // 动量延续调制：昨日涨跌幅同向放大动量，反向削弱
+        val prevCtx = f.prevDayPct?.let { 1.0 + PREVDAY_CTX_MAX * tanh(it / PREVDAY_CTX_SCALE) } ?: 1.0
+        val momentumZ = momentumRaw * prevCtx
+
+        // 连阳/连阴：有界整数，比例缩放而非 z-score（避免小标准差导致 z 膨胀）
+        val streakZ = f.upStreak?.let { it.toDouble() / STREAK_DIV } ?: 0.0
+
+        val baseAmp = if (f.volZ != null) VOL_AMP_MAX * tanh(f.volZ / VOL_Z_DIV) else 0.0
         if (f.volZ == null) insufficient += "放量因子缺失"
+        // 趋势情境调整：趋势向上放大放量信号，向下削弱
+        val trendCtx = f.trendDevPct?.let { 1.0 + TREND_CTX_MAX * tanh(it / TREND_CTX_SCALE) } ?: 1.0
 
         return StandardizedFactors(
-            strengthZ = strengthZ,
+            strengthRaw = combined,
+            strengthMean = stats?.first,
+            strengthStd = stats?.second,
             endMoveZ = endMoveZ,
+            momentumZ = momentumZ,
+            streakZ = streakZ,
             breadth = f.sectorBreadth,
             extUpContrib = extUpContrib,
             extDownContrib = extDownContrib,
-            volAmp = volAmp,
+            volAmp = baseAmp * trendCtx,
             insufficient = insufficient
         )
     }
 
+    /** 强度贡献：按候选权重重算合成值与标准化（8.3 搜索时用；stats 可空=领域除数回退） */
+    fun strengthC(raw: Double?, mean: Double?, std: Double?, w: CalibratedWeights): Double {
+        if (raw == null) return 0.0
+        val z = if (std != null && std > 0 && mean != null) (raw - mean) / std
+        else raw / FALLBACK_STRENGTH_DIV
+        return 2.0 * tanh(z / w.strengthScale)
+    }
+
     // ---------------- 评分 ----------------
 
-    /** score = (强度C + 末端C)·(1+放量放大) + 广度C + 外围C，名义范围 ±10 */
+    /** score = (强度 + 末端 + 动量 + 连阳)C·(1+放量放大) + 交互项C + 广度C + 外围C，名义范围约 ±13 */
     fun score(sf: StandardizedFactors, w: CalibratedWeights): Double {
-        val strengthC = 2.0 * tanh(sf.strengthZ / w.strengthScale)
+        val strengthC = strengthC(sf.strengthRaw, sf.strengthMean, sf.strengthStd, w)
         val endC = sf.endMoveZ?.let { 2.0 * tanh(it / w.endScale) } ?: 0.0
+        val momentumC = 2.0 * tanh(sf.momentumZ / w.momentumScale)
+        val streakC = 2.0 * tanh(sf.streakZ / w.streakScale)
+        // 交互项（8.4）：竞价强度 × 动量同向共振加分，反向扣分
+        val interC = w.interactionScale *
+            tanh(strengthC / 2.0) * tanh(momentumC / 2.0) * 2.0
         val breadthC = sf.breadth?.let { BREADTH_RANGE * it * w.breadthScale } ?: 0.0
         val extC = sf.extUpContrib * w.extUpScale + sf.extDownContrib * w.extDownScale
-        return (strengthC + endC) * (1.0 + sf.volAmp) + breadthC + extC
+        return (strengthC + endC + momentumC + streakC) * (1.0 + sf.volAmp) + interC + breadthC + extC
     }
 
     // ---------------- 分类与建议 ----------------
