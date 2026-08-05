@@ -27,6 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
@@ -125,6 +126,7 @@ fun StockApp() {
     var showPriceDialog by remember { mutableStateOf(false) }
     var showPredDetail by remember { mutableStateOf(false) }
     var showSectorPicker by remember { mutableStateOf(false) }
+    var deleteTarget by remember { mutableStateOf<Pair<Int, String>?>(null) }
 
     val notifLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -188,7 +190,11 @@ fun StockApp() {
                             accounts = state.accounts,
                             selectedIndex = state.selectedIndex,
                             onSelect = vm::selectStock,
-                            onAddClick = { showAddDialog = true }
+                            onAddClick = { showAddDialog = true },
+                            onDelete = { i ->
+                                val n = state.accounts.getOrNull(i)?.stock?.name ?: return@StockBar
+                                deleteTarget = i to n
+                            }
                         )
                     }
                 }
@@ -275,6 +281,21 @@ fun StockApp() {
         )
     }
 
+    deleteTarget?.let { (idx, name) ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("删除股票") },
+            text = { Text("删除「$name」？其持仓、交易记录与预测数据将一并删除，不可恢复。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.removeStock(idx)
+                    deleteTarget = null
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("取消") } }
+        )
+    }
+
     if (showClearDialog) {
         ClearDialog(
             onClearSelected = { vm.clearSelected(); showClearDialog = false },
@@ -297,13 +318,14 @@ fun StockApp() {
     }
 }
 
-// ---------------- 股票切换标签栏 ----------------
+// ---------------- 股票切换标签栏（chip 上带删除按钮） ----------------
 @Composable
 private fun StockBar(
     accounts: List<StockAccount>,
     selectedIndex: Int,
     onSelect: (Int) -> Unit,
-    onAddClick: () -> Unit
+    onAddClick: () -> Unit,
+    onDelete: (Int) -> Unit
 ) {
     Row(
         Modifier
@@ -315,7 +337,20 @@ private fun StockBar(
             FilterChip(
                 selected = i == selectedIndex,
                 onClick = { onSelect(i) },
-                label = { Text(acc.stock.name) }
+                label = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(acc.stock.name)
+                        Spacer(Modifier.width(2.dp))
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "删除 ${acc.stock.name}",
+                            modifier = Modifier
+                                .size(14.dp)
+                                .clickable { onDelete(i) },
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             )
         }
         FilterChip(selected = false, onClick = onAddClick, label = { Text("＋ 添加") })
@@ -1001,11 +1036,9 @@ private fun ClearDialog(onClearSelected: () -> Unit, onClearAll: () -> Unit, onD
         title = { Text("一键清空") },
         text = { Text("请选择清空范围：") },
         confirmButton = {
-            TextButton(onClick = onClearAll) { Text("清空全部股票") }
-        },
-        dismissButton = {
             Row {
                 TextButton(onClick = onClearSelected) { Text("仅清空当前") }
+                TextButton(onClick = onClearAll) { Text("清空全部股票") }
                 TextButton(onClick = onDismiss) { Text("取消") }
             }
         }

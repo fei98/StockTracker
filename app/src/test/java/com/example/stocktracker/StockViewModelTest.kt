@@ -617,6 +617,77 @@ class StockViewModelTest {
     }
 
     @Test
+    fun 删除股票_移除账号及全部数据() {
+        val vm = newVm()
+        vm.addStock(quote("000001", "平安银行"))
+        vm.buy(3.0, 100)
+        vm.addStock(quote("600519", "贵州茅台"))
+        vm.buy(2.0, 200)
+        assertEquals(2, vm.state.value.accounts.size)
+
+        vm.removeStock(0)
+        val s = vm.state.value
+        assertEquals(1, s.accounts.size)
+        assertEquals("贵州茅台", s.accounts[0].stock.name)
+        assertTrue(s.message!!.contains("平安银行"))
+    }
+
+    @Test
+    fun 删除选中股票_自动切到后一只() {
+        val vm = newVm()
+        vm.addStock(quote("000001", "平安银行"))
+        vm.addStock(quote("600519", "贵州茅台"))
+        vm.addStock(quote("300750", "宁德时代"))
+        vm.selectStock(1) // 选中茅台
+        vm.removeStock(1)
+        val s = vm.state.value
+        assertEquals(2, s.accounts.size)
+        assertEquals("宁德时代", s.accounts[s.selectedIndex].stock.name) // 切到后一只
+    }
+
+    @Test
+    fun 删除最后一只选中股票_切到前一只() {
+        val vm = newVm()
+        vm.addStock(quote("000001", "平安银行"))
+        vm.addStock(quote("600519", "贵州茅台"))
+        vm.selectStock(1) // 选中茅台（最后一只）
+        vm.removeStock(1)
+        val s = vm.state.value
+        assertEquals(1, s.accounts.size)
+        assertEquals(0, s.selectedIndex)
+        assertEquals("平安银行", s.accounts[0].stock.name)
+    }
+
+    @Test
+    fun 删除选中之前的股票_选中索引前移() {
+        val vm = newVm()
+        vm.addStock(quote("000001", "平安银行"))
+        vm.addStock(quote("600519", "贵州茅台"))
+        vm.selectStock(1) // 选中茅台
+        vm.removeStock(0) // 删除平安银行
+        val s = vm.state.value
+        assertEquals(0, s.selectedIndex) // 茅台索引前移仍被选中
+        assertEquals("贵州茅台", s.accounts[s.selectedIndex].stock.name)
+    }
+
+    @Test
+    fun 删除唯一股票_回到空状态() {
+        val vm = vmWithStock()
+        vm.buy(3.0, 100)
+        vm.removeStock(0)
+        val s = vm.state.value
+        assertTrue(s.accounts.isEmpty())
+        assertEquals(-1, s.selectedIndex)
+    }
+
+    @Test
+    fun 删除不存在的索引_无操作() {
+        val vm = vmWithStock()
+        vm.removeStock(5)
+        assertEquals(1, vm.state.value.accounts.size)
+    }
+
+    @Test
     fun 消息_会随下次操作被覆盖() {
         val vm = vmWithStock()
         vm.buy(3.0, 100)

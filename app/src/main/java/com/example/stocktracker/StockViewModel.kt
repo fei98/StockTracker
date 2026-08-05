@@ -112,6 +112,28 @@ class StockViewModel(
         persist()
     }
 
+    /** 删除某只股票（连同持仓/交易记录/行情），并修正选中索引 */
+    fun removeStock(index: Int) {
+        val s = _state.value
+        val acc = s.accounts.getOrNull(index) ?: return
+        val name = acc.stock.name
+        val newAccounts = s.accounts.filterIndexed { i, _ -> i != index }
+        val newIndex = when {
+            newAccounts.isEmpty() -> -1
+            s.selectedIndex == index -> minOf(index, newAccounts.size - 1) // 删选中 → 选后一只（没有则前一只）
+            s.selectedIndex > index -> s.selectedIndex - 1                 // 删前面的 → 索引前移
+            else -> s.selectedIndex
+        }
+        _state.update {
+            it.copy(
+                accounts = newAccounts,
+                selectedIndex = newIndex,
+                message = "已删除「$name」及其全部数据"
+            )
+        }
+        persist()
+    }
+
     /** 刷新选中股票的实时价格并作为现价 */
     fun refreshPrice() {
         val stock = _state.value.selected?.stock ?: return
