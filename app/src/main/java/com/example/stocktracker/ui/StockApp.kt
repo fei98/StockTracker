@@ -376,15 +376,27 @@ private fun SummaryCard(acc: StockAccount, onEditPrice: () -> Unit, onRefresh: (
                     }
                 }
                 InfoCol("市值", if (acc.currentPrice != null) "¥${formatMoney(acc.marketValue)}" else "—")
-                InfoCol(
-                    "浮动盈亏",
-                    if (acc.currentPrice != null) "${if (acc.totalPnl >= 0) "+" else ""}${formatMoney(acc.totalPnl)}" else "—",
-                    valueColor = if (acc.currentPrice != null) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("浮动盈亏", color = Color.White.copy(alpha = 0.8f), fontSize = 11.sp)
+                    val pnlColorValue = if (acc.currentPrice != null) {
                         if (acc.totalPnl > 0.0001) Color(0xFFFFCDD2)
                         else if (acc.totalPnl < -0.0001) Color(0xFFC8E6C9)
                         else Color.White
                     } else Color.White
-                )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            if (acc.currentPrice != null) "${if (acc.totalPnl >= 0) "+" else ""}${formatMoney(acc.totalPnl)}" else "—",
+                            color = pnlColorValue, fontWeight = FontWeight.Bold, fontSize = 14.sp
+                        )
+                        if (acc.currentPrice != null && acc.totalPnlPercent != 0.0) {
+                            Spacer(Modifier.width(3.dp))
+                            Text(
+                                "${if (acc.totalPnlPercent > 0) "+" else ""}${String.format("%.2f%%", acc.totalPnlPercent)}",
+                                color = pnlColorValue, fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
             }
         }
     }
@@ -657,7 +669,10 @@ private fun TradeRow(t: com.example.stocktracker.TradeRecord) {
                 Spacer(Modifier.width(8.dp))
                 Text("¥${formatPrice(t.price)} × ${t.qty}股", fontWeight = FontWeight.Medium)
             }
-            Text(formatTime(t.time), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+            Text(
+                "${formatTime(t.time)} · 成本 ¥${formatMoney(t.cost)}",
+                fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+            )
         }
         if (t.type == TradeType.SELL) {
             Text(

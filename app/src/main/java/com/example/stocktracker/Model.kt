@@ -35,7 +35,10 @@ data class TradeRecord(
     val qty: Int,
     val profit: Double = 0.0, // 仅卖出时有意义：本次卖出实现盈亏
     val time: Long = System.currentTimeMillis()
-)
+) {
+    /** 本次交易成本：买入 = 成交金额；卖出 = 被卖出持仓对应的成本（成交金额 - 盈亏） */
+    val cost: Double get() = if (type == TradeType.BUY) price * qty else price * qty - profit
+}
 
 enum class TradeType { BUY, SELL }
 
@@ -97,6 +100,10 @@ data class StockAccount(
 
     /** 现价下的总浮动盈亏 */
     val totalPnl: Double get() = marketValue - totalCost
+
+    /** 现价相对持仓均价的收益率（%），无现价或无持仓均价时为 0 */
+    val totalPnlPercent: Double
+        get() = if (currentPrice != null && avgPrice > 0) (currentPrice - avgPrice) / avgPrice * 100 else 0.0
 
     /** 每批持仓的盈亏明细 */
     val lotPnls: List<LotPnl>

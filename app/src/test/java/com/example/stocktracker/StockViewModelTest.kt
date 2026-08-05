@@ -325,6 +325,16 @@ class StockViewModelTest {
     }
 
     @Test
+    fun 现价_收益率相对持仓均价() {
+        val vm = vmWithBuys(3.0 to 100)
+        assertEquals(0.0, vm.state.value.selected!!.totalPnlPercent, 0.0001) // 无现价
+        vm.setCurrentPrice(3.3)
+        assertEquals(10.0, vm.state.value.selected!!.totalPnlPercent, 0.0001) // (3.3-3)/3
+        vm.setCurrentPrice(2.4)
+        assertEquals(-20.0, vm.state.value.selected!!.totalPnlPercent, 0.0001)
+    }
+
+    @Test
     fun 现价_零_合法_全部亏损() {
         val vm = vmWithBuys(3.0 to 100)
         vm.setCurrentPrice(0.0)
@@ -529,6 +539,17 @@ class StockViewModelTest {
         assertEquals(TradeType.BUY, trades[0].type)
         assertEquals(TradeType.SELL, trades[1].type)
         assertEquals(50.0, trades[1].profit, 0.0001)
+    }
+
+    @Test
+    fun 交易记录_买入成本为成交金额_卖出成本为对应持仓成本() {
+        val vm = vmWithBuys(1.0 to 100, 3.0 to 300)
+        assertEquals(100.0, vm.state.value.selected!!.trades[0].cost, 0.0001)
+        assertEquals(900.0, vm.state.value.selected!!.trades[1].cost, 0.0001)
+        vm.sell(4.0, 150) // 抵1元100(+300) + 3元50(+50)，盈利350
+        val sell = vm.state.value.selected!!.trades.last()
+        assertEquals(600.0, sell.price * sell.qty, 0.0001) // 成交金额
+        assertEquals(250.0, sell.cost, 0.0001)             // 600 - 350
     }
 
     // ---------------- 其他 ----------------
