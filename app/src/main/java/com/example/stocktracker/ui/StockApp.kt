@@ -1,5 +1,10 @@
 package com.example.stocktracker.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -65,13 +70,21 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.clickable
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.stocktracker.PredictionEngine
+import com.example.stocktracker.PredictionOutcome
+import com.example.stocktracker.PredictionViewModel
+import com.example.stocktracker.PrefsSnapshotStore
 import com.example.stocktracker.QuoteResult
 import com.example.stocktracker.PrefsStorage
 import com.example.stocktracker.StockAccount
+import com.example.stocktracker.StockApi
 import com.example.stocktracker.StockState
 import com.example.stocktracker.StockViewModel
+import com.example.stocktracker.TargetType
+import com.example.stocktracker.TencentMarketDataApi
 import com.example.stocktracker.TradeType
 import com.example.stocktracker.formatMoney
 import com.example.stocktracker.formatPrice
@@ -93,12 +106,37 @@ fun StockApp() {
     }
     val state by vm.state.collectAsStateWithLifecycle()
     val acc = state.selected
+    val predStore = remember { PrefsSnapshotStore(context) }
+    val predVm: PredictionViewModel = viewModel {
+        PredictionViewModel(PredictionEngine(TencentMarketDataApi(StockApi()), predStore), predStore)
+    }
+    val predUi by predVm.ui.collectAsStateWithLifecycle()
+    val predStock = acc?.stock
+
+    // 切换选中股票时，预测卡刷新为对应股票的数据
+    LaunchedEffect(predStock?.marketCode) {
+        predStock?.let { predVm.refresh(it) }
+    }
     val snackbar = remember { SnackbarHostState() }
     var showClearDialog by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
     var showTradeDialog by remember { mutableStateOf(false) }
     var showHistoryDialog by remember { mutableStateOf(false) }
     var showPriceDialog by remember { mutableStateOf(false) }
+    var showPredDetail by remember { mutableStateOf(false) }
+    var showSectorPicker by remember { mutableStateOf(false) }
+
+    val notifLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { }
+    fun requestNotifPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
 
     LaunchedEffect(state.message) {
         state.message?.let { msg ->
@@ -164,6 +202,18 @@ fun StockApp() {
                             onRefresh = vm::refreshPrice
                         )
                     }
+                    item {
+                        if (predStock != null) {
+                            PredictionCard(
+                                ui = predUi,
+                                onPredict = {
+                                    requestNotifPermissionIfNeeded()
+                                    predVm.predict(predStock, hasPosition = acc.totalQty > 0)
+                                },
+                                onDetail = { showPredDetail = true }
+                            )
+                        }
+                    }
                     item { HoldingsCard(acc) }
                     item { HistoryPreviewCard(acc.trades) { showHistoryDialog = true } }
                     item {
@@ -203,6 +253,25 @@ fun StockApp() {
             onSet = vm::setCurrentPrice,
             onRefresh = vm::refreshPrice,
             onDismiss = { showPriceDialog = false }
+        )
+    }
+
+    if (showPredDetail) {
+        PredictionDetailDialog(
+            ui = predUi,
+            onDismiss = { showPredDetail = false },
+            onConfigSector = { showPredDetail = false; showSectorPicker = true }
+        )
+    }
+
+    if (showSectorPicker && predStock != null) {
+        SectorPickerDialog(
+            currentIndustry = predUi.stock?.let { predStore.getUserSector(it.marketCode) },
+            onSelect = { ind ->
+                predVm.setSector(predStock, ind)
+                showSectorPicker = false
+            },
+            onDismiss = { showSectorPicker = false }
         )
     }
 
@@ -327,6 +396,185 @@ private fun AddStockDialog(
     )
 }
 
+// ---------------- 竞价预测卡（紧凑：仅核心结论，详情进弹窗） ----------------
+@Composable
+private fun PredictionCard(
+    ui: PredictionViewModel.UiState,
+    onPredict: () -> Unit,
+    onDetail: () -> Unit
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            val stock = ui.stock
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "竞价预测 · ${stock?.name ?: ""}",
+                    fontWeight = FontWeight.Bold, fontSize = 13.sp,
+                    modifier = Modifier.weight(1f)
+                )
+                if (stock != null && !PredictionEngine.isPredictable(stock)) {
+                    HintText("无集合竞价")
+                } else if (ui.running) {
+                    HintText("预测中…")
+                } else {
+                    Button(
+                        onClick = onPredict,
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 2.dp)
+                    ) { Text("预测", fontSize = 12.sp) }
+                }
+            }
+            val result = ui.result
+            when {
+                stock != null && !PredictionEngine.isPredictable(stock) -> {
+                    HintText("港股/美股无 A 股式集合竞价，不支持竞价预测")
+                }
+                ui.inObservationPhase -> {
+                    val obs = ui.observation
+                    if (obs?.intentMovePct != null && obs.intentVolSurge != null) {
+                        HintText("观察区：量价变化 ${signedPct(obs.intentMovePct)} · 量能×${String.format("%.1f", 1 + obs.intentVolSurge)}，9:20 后可预测")
+                    } else {
+                        HintText("观察区（9:15–9:20 可撤单），9:20 后给出预测")
+                    }
+                }
+                ui.error != null -> HintText(ui.error)
+                result != null -> {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "${result.conclusion.label} · 评分 ${signedPct(result.score)} · 置信 ${result.confidence}",
+                            color = when (result.conclusion) {
+                                PredictionOutcome.UP -> UpColor
+                                PredictionOutcome.DOWN -> DownColor
+                                else -> MaterialTheme.colorScheme.onSurface
+                            },
+                            fontWeight = FontWeight.Bold, fontSize = 13.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = onDetail) { Text("详情", fontSize = 12.sp) }
+                    }
+                }
+                else -> HintText("9:20 后点击预测")
+            }
+        }
+    }
+}
+
+@Composable
+private fun signedPct(v: Double): String =
+    String.format(if (v >= 0) "+%.1f%%" else "%.1f%%", v)
+
+// ---------------- 竞价预测详情弹窗 ----------------
+@Composable
+private fun PredictionDetailDialog(
+    ui: PredictionViewModel.UiState,
+    onDismiss: () -> Unit,
+    onConfigSector: () -> Unit
+) {
+    val result = ui.result
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("竞价预测详情") },
+        text = {
+            LazyColumn(Modifier.heightIn(max = 420.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (result == null) {
+                    item { EmptyText(ui.error ?: "暂无预测结果") }
+                } else {
+                    item { DetailRow("结论", "${result.conclusion.label}（评分 ${signedPct(result.score)}）") }
+                    item { DetailRow("置信", result.confidence) }
+                    item { DetailRow("分档阈值", String.format("%.1f", result.weights.threshold)) }
+                    item { DetailRow("封顶", result.capApplied?.let { "已封顶 ±$it" } ?: "未触发") }
+                    item { HorizontalDivider() }
+                    item { DetailRow("159915 高开", result.factors.targetGapPct?.let { signedPct(it) } ?: "—") }
+                    item { DetailRow("创业板指", result.factors.indexGapPct?.let { signedPct(it) } ?: "—") }
+                    item { DetailRow("权重股均值", result.factors.sectorAvgGap?.let { signedPct(it) } ?: "—") }
+                    item { DetailRow("板块广度", result.factors.sectorBreadth?.let { String.format("%.2f", it) } ?: "—") }
+                    item { DetailRow("隔夜美股", result.factors.externalAvg?.let { signedPct(it) } ?: "—") }
+                    item { DetailRow("竞价末端上移", result.factors.endMovePct?.let { signedPct(it) } ?: "无基准快照") }
+                    item { DetailRow("放量 z-score", result.factors.volZ?.let { String.format("%.2f", it) } ?: "数据积累中") }
+                    if (result.insufficient.isNotEmpty()) {
+                        item { Text(result.insufficient.joinToString("；"), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)) }
+                    }
+                    item { HorizontalDivider() }
+                    item { DetailRow("板块联动", ui.sectorDetail) }
+                    item {
+                        TextButton(
+                            onClick = onConfigSector,
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("配置行业联动名单", fontSize = 12.sp) }
+                    }
+                    item { HorizontalDivider() }
+                    item { DetailRow("建议", result.suggestion) }
+                    item { Text(result.disclaimer, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)) }
+                    item { HorizontalDivider() }
+                    item { Text("前推回测命中率（预测方向正确率，不含平盘）", fontWeight = FontWeight.Bold, fontSize = 12.sp) }
+                    TargetType.entries.forEach { t ->
+                        val s = ui.stats[t]
+                        if (s != null) {
+                            item {
+                                DetailRow(
+                                    t.label,
+                                    if (s.directionalTotal == 0) "数据积累中"
+                                    else String.format("%.0f%%（%d/%d）", s.hitRate * 100, s.directionalHit, s.directionalTotal)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+    )
+}
+
+@Composable
+private fun DetailRow(label: String, value: String) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+        Text(value, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+// ---------------- 行业联动配置弹窗 ----------------
+@Composable
+private fun SectorPickerDialog(
+    currentIndustry: String?,
+    onSelect: (String?) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val industries = TencentMarketDataApi.INDUSTRY_SECTOR_LISTS.keys.toList()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("配置行业联动名单") },
+        text = {
+            Column {
+                HintText("自动推荐会在积累 ≥10 天行情后生效；选择行业可立即使用内置龙头名单：")
+                Spacer(Modifier.height(6.dp))
+                LazyColumn(Modifier.heightIn(max = 320.dp)) {
+                    items(industries) { ind ->
+                        TextButton(
+                            onClick = { onSelect(ind) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                ind + if (ind == currentIndustry) "（当前）" else "",
+                                fontSize = 14.sp,
+                                color = if (ind == currentIndustry) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSelect(null) }) { Text("恢复自动推荐") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
 // ---------------- 账户总盈亏条（点击一键刷新全部行情） ----------------
 @Composable
 private fun AccountPnlBar(s: StockState, onRefreshAll: () -> Unit) {
@@ -415,6 +663,17 @@ private fun SummaryCard(acc: StockAccount, onEditPrice: () -> Unit, onRefresh: (
                                 modifier = Modifier.size(12.dp).padding(start = 2.dp),
                                 tint = Color.White.copy(alpha = 0.7f)
                             )
+                            val chg = acc.dayChangePct
+                            if (chg != null) {
+                                Spacer(Modifier.width(3.dp))
+                                Text(
+                                    (if (chg >= 0) "+" else "") + String.format("%.2f%%", chg),
+                                    fontSize = 11.sp,
+                                    color = if (chg > 0.0001) Color(0xFFFFCDD2)
+                                    else if (chg < -0.0001) Color(0xFFC8E6C9)
+                                    else Color.White.copy(alpha = 0.7f)
+                                )
+                            }
                         }
                     }
                 }

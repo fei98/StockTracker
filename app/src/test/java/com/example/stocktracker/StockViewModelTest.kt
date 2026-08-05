@@ -16,8 +16,8 @@ class StockViewModelTest {
     /** 昨天的同一时刻（买入后次日才可卖，用于构造可卖持仓） */
     private val yesterday = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
 
-    private fun quote(code: String = "000001", name: String = "平安银行", price: Double? = null) =
-        QuoteResult(code, name, price, "sz")
+    private fun quote(code: String = "000001", name: String = "平安银行", price: Double? = null, prevClose: Double? = null) =
+        QuoteResult(code, name, price, "sz", prevClose)
 
     /** 添加一只股票并选中（index 0） */
     private fun vmWithStock(code: String = "000001", name: String = "平安银行"): StockViewModel {
@@ -335,6 +335,26 @@ class StockViewModelTest {
     }
 
     @Test
+    fun 现价_涨跌幅按昨收计算() {
+        val vm = newVm()
+        vm.addStock(quote(price = 3.3, prevClose = 3.0))
+        assertEquals(10.0, vm.state.value.selected!!.dayChangePct!!, 0.0001)
+        vm.setCurrentPrice(2.85)
+        assertEquals(-5.0, vm.state.value.selected!!.dayChangePct!!, 0.0001)
+        vm.setCurrentPrice(3.0)
+        assertEquals(0.0, vm.state.value.selected!!.dayChangePct!!, 0.0001)
+    }
+
+    @Test
+    fun 现价_无昨收或未设现价时涨跌幅为null() {
+        val vm = newVm()
+        vm.addStock(quote(price = 3.0)) // 无昨收
+        assertEquals(null, vm.state.value.selected!!.dayChangePct)
+        vm.setCurrentPrice(null)
+        assertEquals(null, vm.state.value.selected!!.dayChangePct)
+    }
+
+    @Test
     fun 现价_零_合法_全部亏损() {
         val vm = vmWithBuys(3.0 to 100)
         vm.setCurrentPrice(0.0)
@@ -468,6 +488,7 @@ class StockViewModelTest {
         assertEquals("000001", r!!.code)
         assertEquals("平安银行", r.name)
         assertEquals(10.52, r.price!!, 0.0001)
+        assertEquals(10.53, r.prevClose!!, 0.0001)
     }
 
     @Test

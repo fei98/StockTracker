@@ -72,10 +72,18 @@ data class StockAccount(
     val stock: Stock,
     val holdings: List<BuyLot> = emptyList(),
     val trades: List<TradeRecord> = emptyList(),
-    val currentPrice: Double? = null
+    val currentPrice: Double? = null,
+    val prevClose: Double? = null   // 昨收（刷新行情时记录，用于涨跌幅）
 ) {
     /** 总持仓数量 */
     val totalQty: Int get() = holdings.sumOf { it.remainingQty }
+
+    /** 今日涨跌幅%（(现价-昨收)/昨收），缺昨收返回 null */
+    val dayChangePct: Double? get() {
+        val cp = currentPrice ?: return null
+        val pc = prevClose ?: return null
+        return if (pc > 0) (cp - pc) / pc * 100 else null
+    }
 
     /** T+1 可卖批次：A 股（sh/sz/bj）当日买入的冻结，港美股 T+0 当日即可卖 */
     val sellableHoldings: List<BuyLot>
@@ -120,7 +128,8 @@ data class QuoteResult(
     val code: String,
     val name: String,
     val price: Double?,
-    val market: String
+    val market: String,
+    val prevClose: Double? = null
 )
 
 data class StockState(

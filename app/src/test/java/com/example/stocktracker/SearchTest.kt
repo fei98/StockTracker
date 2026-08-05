@@ -10,10 +10,16 @@ import org.junit.Test
 class FakeApi(
     private val result: QuoteResult? = null,
     private val price: Double? = null,
-    private val prices: Map<String, Double> = emptyMap()
+    private val prices: Map<String, Double> = emptyMap(),
+    private val quotes: Map<String, QuoteFields> = emptyMap()
 ) : StockApi() {
     override suspend fun searchStock(input: String): QuoteResult? = result
-    override suspend fun fetchPrice(stock: Stock): Double? = prices[stock.marketCode] ?: price
+    override suspend fun fetchQuote(stock: Stock): QuoteFields? {
+        quotes[stock.marketCode]?.let { return it }
+        val p = prices[stock.marketCode] ?: price ?: return null
+        return QuoteFields(stock.name, stock.code, p, null, null, null, null, "")
+    }
+    override suspend fun fetchPrice(stock: Stock): Double? = fetchQuote(stock)?.price
 }
 
 /** 覆盖：搜索股票名称/现价、搜索失败提示、重复股票提示、清除搜索 */
@@ -114,5 +120,21 @@ class SearchTest {
         val s = vm.state.value
         assertEquals(10.5, s.accounts[0].currentPrice!!, 0.0001)
         assertEquals(1400.0, s.accounts[1].currentPrice!!, 0.0001) // 刷新失败保留旧价
+    }
+
+    @Test
+    fun 刷新现价_同时记录昨收用于涨跌幅() {
+        val api = FakeApi(quotes = mapOf(
+            "sz159915" to QuoteFields("创业板ETF华夏", "159915", 3.542, 3.514, null, 0.8, null, "")
+        ))
+        val vm = StockViewModel(api = api)
+        vm.addStock(QuoteResult("159915", "创业板ETF华夏", 3.0, "sz"))
+        vm.refreshPrice()
+        await { vm.state.value.selected?.prevClose == 3.514 }
+        val acc = vm.state.value.selected!!
+        assertEquals(3.542, acc.currentPrice!!, 0.0001)
+        assertEquals(3.514, acc.prevClose!!, 0.0001)
+        // (3.542-3.514)/3.514 ≈ +0.80%
+        assertEquals(0.797, acc.dayChangePct!!, 0.01)
     }
 }

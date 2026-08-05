@@ -69,6 +69,7 @@ private fun buildState(s: StockState): String {
                 .put("name", acc.stock.name)
                 .put("market", acc.stock.market)
                 .put("currentPrice", acc.currentPrice ?: JSONObject.NULL)
+                .put("prevClose", acc.prevClose ?: JSONObject.NULL)
                 .put("holdings", lots)
                 .put("trades", trades)
         )
@@ -99,7 +100,8 @@ private fun parseState(raw: String): StockState {
                 stock = Stock(a.getString("code"), a.getString("name"), a.getString("market")),
                 holdings = holdings,
                 trades = trades,
-                currentPrice = if (a.isNull("currentPrice")) null else a.getDouble("currentPrice")
+                currentPrice = if (a.isNull("currentPrice")) null else a.getDouble("currentPrice"),
+                prevClose = if (a.isNull("prevClose")) null else a.getDouble("prevClose")
             )
         )
     }

@@ -10,6 +10,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        PredictionNotifier.ensureChannel(this)
+        PredictionScheduler.ensureScheduled(this)
         setContent { StockApp() }
     }
 }

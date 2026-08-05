@@ -91,7 +91,8 @@ class StockViewModel(
             } else {
                 val acc = StockAccount(
                     stock = Stock(result.code, result.name, result.market),
-                    currentPrice = result.price
+                    currentPrice = result.price,
+                    prevClose = result.prevClose
                 )
                 s.copy(
                     accounts = s.accounts + acc,
@@ -115,12 +116,12 @@ class StockViewModel(
     fun refreshPrice() {
         val stock = _state.value.selected?.stock ?: return
         viewModelScope.launch {
-            val price = withContext(Dispatchers.IO) { api.fetchPrice(stock) }
+            val quote = withContext(Dispatchers.IO) { api.fetchQuote(stock) }
             _state.update { s ->
-                if (price == null) s.copy(message = "行情刷新失败，请检查网络")
+                if (quote?.price == null) s.copy(message = "行情刷新失败，请检查网络")
                 else s.copy(
-                    accounts = updateSelected(s) { it.copy(currentPrice = price) },
-                    message = "已刷新现价：${formatPrice(price)} 元"
+                    accounts = updateSelected(s) { it.copy(currentPrice = quote.price, prevClose = quote.prevClose) },
+                    message = "已刷新现价：${formatPrice(quote.price)} 元"
                 )
             }
             persist()
@@ -132,14 +133,14 @@ class StockViewModel(
         val stocks = _state.value.accounts.map { it.stock }
         if (stocks.isEmpty()) return
         viewModelScope.launch {
-            val results = stocks.map { stock -> async { stock to api.fetchPrice(stock) } }.awaitAll()
-            val fetched = results.filter { it.second != null }
+            val results = stocks.map { stock -> async { stock to api.fetchQuote(stock) } }.awaitAll()
+            val fetched = results.filter { it.second?.price != null }
             _state.update { s ->
                 if (fetched.isEmpty()) s.copy(message = "行情刷新失败，请检查网络")
                 else {
                     val accounts = s.accounts.map { a ->
-                        val price = fetched.firstOrNull { it.first.code == a.stock.code && it.first.market == a.stock.market }?.second
-                        if (price != null) a.copy(currentPrice = price) else a
+                        val quote = fetched.firstOrNull { it.first.code == a.stock.code && it.first.market == a.stock.market }?.second
+                        if (quote?.price != null) a.copy(currentPrice = quote.price, prevClose = quote.prevClose) else a
                     }
                     s.copy(
                         accounts = accounts,

@@ -54,7 +54,13 @@ fun parseTencentQuote(raw: String): QuoteResult? {
     val name = parts[1].trim()
     val code = parts[2].trim()
     if (name.isEmpty() || code.isEmpty()) return null
-    return QuoteResult(code, name, parts[3].trim().toDoubleOrNull(), "")
+    return QuoteResult(
+        code = code,
+        name = name,
+        price = parts.getOrNull(3)?.trim()?.toDoubleOrNull(),
+        market = "",
+        prevClose = parts.getOrNull(4)?.trim()?.toDoubleOrNull()
+    )
 }
 
 /**
@@ -92,4 +98,11 @@ open class StockApi(
         val text = fetch(stock.marketCode) ?: return null
         return parseTencentQuote(text)?.price
     }
+
+    /** 查询某只股票的完整行情（现价 + 昨收，用于涨跌幅显示） */
+    open suspend fun fetchQuote(stock: Stock): QuoteFields? =
+        fetchRaw(stock.marketCode)?.let(::parseQuoteFields)
+
+    /** 按完整代码取原始行情文本（预测模块用），失败返回 null */
+    open suspend fun fetchRaw(query: String): String? = fetch(query)
 }
