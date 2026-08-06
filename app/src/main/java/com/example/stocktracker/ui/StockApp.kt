@@ -1,14 +1,18 @@
 package com.example.stocktracker.ui
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -65,6 +69,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -76,8 +81,10 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -96,14 +103,21 @@ import com.example.stocktracker.PredictionViewModel
 import com.example.stocktracker.PrefsSnapshotStore
 import com.example.stocktracker.QuoteResult
 import com.example.stocktracker.PrefsStorage
+import com.example.stocktracker.R
+import com.example.stocktracker.SettingsStore
 import com.example.stocktracker.StockAccount
 import com.example.stocktracker.StockApi
 import com.example.stocktracker.StockState
 import com.example.stocktracker.StockViewModel
 import com.example.stocktracker.TargetType
 import com.example.stocktracker.TencentMarketDataApi
+import com.example.stocktracker.ThemePreference
 import com.example.stocktracker.TradeType
+import com.example.stocktracker.UpdateChecker
 import com.example.stocktracker.overviewEntries
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.example.stocktracker.formatMoney
 import com.example.stocktracker.formatPrice
 import com.example.stocktracker.formatTime
@@ -124,6 +138,17 @@ fun StockApp() {
     val vm: StockViewModel = viewModel {
         StockViewModel(PrefsStorage(context), feeStore = FeeConfigStore(context))
     }
+    val settingsStore = remember { SettingsStore(context) }
+    var themePref by remember { mutableStateOf(settingsStore.loadTheme()) }
+    val versionName = remember {
+        runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }
+            .getOrNull() ?: "?"
+    }
+    val versionCode = remember {
+        runCatching { context.packageManager.getPackageInfo(context.packageName, 0).longVersionCode }
+            .getOrDefault(0L)
+    }
+    val signatureFingerprint = remember { signatureFingerprintOf(context) }
     val state by vm.state.collectAsStateWithLifecycle()
     val acc = state.selected
     val predStore = remember { PrefsSnapshotStore(context) }
@@ -146,7 +171,13 @@ fun StockApp() {
     var showSectorPicker by remember { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<Pair<Int, String>?>(null) }
     var showOverview by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
     var showFeeSettings by remember { mutableStateOf(false) }
+    var showAbout by remember { mutableStateOf(false) }
+    var showDonate by remember { mutableStateOf(false) }
+    var checkingUpdate by remember { mutableStateOf(false) }
+    var updateCheck by remember { mutableStateOf<UpdateCheckState?>(null) }
+    val uiScope = rememberCoroutineScope()
     var showIntradayDialog by remember { mutableStateOf(false) }
     val intraday by vm.intraday.collectAsStateWithLifecycle()
     val intradayLoading by vm.intradayLoading.collectAsStateWithLifecycle()
@@ -173,7 +204,13 @@ fun StockApp() {
         }
     }
 
-    StockTrackerTheme {
+    StockTrackerTheme(
+        darkTheme = when (themePref) {
+            ThemePreference.LIGHT -> false
+            ThemePreference.DARK -> true
+            ThemePreference.SYSTEM -> isSystemInDarkTheme()
+        }
+    ) {
         Scaffold(
             containerColor = MaterialTheme.colorScheme.background,
             snackbarHost = { SnackbarHost(snackbar) },
@@ -192,10 +229,10 @@ fun StockApp() {
                                 tint = MaterialTheme.colorScheme.onPrimary
                             )
                         }
-                        IconButton(onClick = { showFeeSettings = true }) {
+                        IconButton(onClick = { showSettings = true }) {
                             Icon(
                                 Icons.Default.Settings,
-                                contentDescription = "费率设置",
+                                contentDescription = "设置",
                                 tint = MaterialTheme.colorScheme.onPrimary
                             )
                         }
@@ -348,11 +385,73 @@ fun StockApp() {
         )
     }
 
+    if (showSettings) {
+        SettingsDialog(
+            themePref = themePref,
+            onThemeChange = {
+                themePref = it
+                settingsStore.saveTheme(it)
+            },
+            onOpenFee = { showFeeSettings = true },
+            onOpenAbout = { showAbout = true },
+            onDismiss = { showSettings = false }
+        )
+    }
+
     if (showFeeSettings) {
         FeeSettingsDialog(
             current = vm.feeConfig,
             onSave = { vm.updateFeeConfig(it); showFeeSettings = false },
             onDismiss = { showFeeSettings = false }
+        )
+    }
+
+    if (showAbout) {
+        AboutDialog(
+            versionName = versionName,
+            versionCode = versionCode,
+            signatureFingerprint = signatureFingerprint,
+            checkingUpdate = checkingUpdate,
+            onCheckUpdate = {
+                if (checkingUpdate) return@AboutDialog
+                checkingUpdate = true
+                uiScope.launch {
+                    val info = withContext(Dispatchers.IO) { UpdateChecker.checkLatest() }
+                    checkingUpdate = false
+                    updateCheck = when {
+                        info == null -> UpdateCheckState(false, "检查更新失败，请检查网络")
+                        UpdateChecker.isNewer(info.latestTag, versionName) ->
+                            UpdateCheckState(true, "发现新版本 ${info.latestTag}", info.apkUrl)
+                        else -> UpdateCheckState(false, "已是最新版本（v$versionName）")
+                    }
+                }
+            },
+            onOpenGitHub = { openUrl(context, GITHUB_URL) },
+            onDonate = { showDonate = true },
+            onDismiss = { showAbout = false }
+        )
+    }
+
+    updateCheck?.let { uc ->
+        AlertDialog(
+            onDismissRequest = { updateCheck = null },
+            title = { Text(if (uc.hasUpdate) "发现新版本" else "检查更新") },
+            text = { Text(uc.message) },
+            confirmButton = {
+                TextButton(onClick = {
+                    updateCheck = null
+                    if (uc.hasUpdate) openUrl(context, uc.apkUrl ?: GITHUB_RELEASES_URL)
+                }) { Text(if (uc.hasUpdate) "前往下载" else "知道了") }
+            },
+            dismissButton = if (uc.hasUpdate) {
+                { TextButton(onClick = { updateCheck = null }) { Text("取消") } }
+            } else null
+        )
+    }
+
+    if (showDonate) {
+        DonateDialog(
+            onDismiss = { showDonate = false }
         )
     }
 
@@ -1412,6 +1511,160 @@ private fun OverviewLegendRow(e: OverviewEntry, tab: OverviewTab, total: Double,
         Spacer(Modifier.width(8.dp))
         Text(String.format("%.1f%%", pct), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
     }
+}
+
+// ---------------- 设置弹窗 ----------------
+private const val GITHUB_URL = "https://github.com/fei98/StockTracker"
+private const val GITHUB_RELEASES_URL = "https://github.com/fei98/StockTracker/releases"
+
+private fun openUrl(context: android.content.Context, url: String) {
+    runCatching {
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+    }
+}
+
+/** 应用签名证书 SHA-256 指纹（用于识别官方版本，防止篡改重打包） */
+private fun signatureFingerprintOf(context: android.content.Context): String? = runCatching {
+    val pm = context.packageManager
+    val flag = if (Build.VERSION.SDK_INT >= 28) PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
+    val info = pm.getPackageInfo(context.packageName, flag)
+    val cert = if (Build.VERSION.SDK_INT >= 28) {
+        info.signingInfo?.apkContentsSigners?.get(0)
+    } else {
+        @Suppress("DEPRECATION")
+        info.signatures?.get(0)
+    }
+    cert?.toByteArray()?.let {
+        java.security.MessageDigest.getInstance("SHA-256").digest(it)
+            .joinToString(":") { b -> String.format("%02X", b) }
+    }
+}.getOrNull()
+
+@Composable
+private fun SettingsDialog(
+    themePref: ThemePreference,
+    onThemeChange: (ThemePreference) -> Unit,
+    onOpenFee: () -> Unit,
+    onOpenAbout: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val themeOptions = listOf(
+        ThemePreference.SYSTEM to "跟随系统",
+        ThemePreference.LIGHT to "亮色",
+        ThemePreference.DARK to "暗色"
+    )
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("设置") },
+        text = {
+            Column {
+                Text("外观", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                Spacer(Modifier.height(6.dp))
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    themeOptions.forEachIndexed { i, (pref, label) ->
+                        SegmentedButton(
+                            selected = themePref == pref,
+                            onClick = { onThemeChange(pref) },
+                            shape = SegmentedButtonDefaults.itemShape(index = i, count = themeOptions.size)
+                        ) { Text(label, fontSize = 12.sp) }
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                HorizontalDivider()
+                SettingRow("费率设置", "佣金 / 印花税 / 过户费", onClick = onOpenFee)
+                SettingRow("关于", "版本 / 检查更新 / 开源", onClick = onOpenAbout)
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } }
+    )
+}
+
+@Composable
+private fun SettingRow(label: String, desc: String, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(label, fontSize = 14.sp)
+            Text(desc, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+        }
+        Text("›", fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
+    }
+}
+
+// ---------------- 关于弹窗 ----------------
+private data class UpdateCheckState(val hasUpdate: Boolean, val message: String, val apkUrl: String? = null)
+
+@Composable
+private fun AboutDialog(
+    versionName: String,
+    versionCode: Long,
+    signatureFingerprint: String?,
+    checkingUpdate: Boolean,
+    onCheckUpdate: () -> Unit,
+    onOpenGitHub: () -> Unit,
+    onDonate: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("关于") },
+        text = {
+            Column {
+                Text("炒股记账本", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Text("版本 v$versionName（build $versionCode）", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                signatureFingerprint?.let { fp ->
+                    Text(
+                        "签名指纹：$fp",
+                        fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
+                    )
+                    Text(
+                        "（从官方渠道下载后可核对指纹，防止被篡改重打包）",
+                        fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+                HorizontalDivider()
+                SettingRow("检查更新", if (checkingUpdate) "检查中…" else "检测 GitHub 最新版本", onClick = onCheckUpdate)
+                SettingRow("开源地址", GITHUB_URL, onClick = onOpenGitHub)
+                SettingRow("作者", "fei98", onClick = {})
+                SettingRow("打赏支持", "支付宝扫码赞赏", onClick = onDonate)
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+    )
+}
+
+// ---------------- 打赏弹窗 ----------------
+@Composable
+private fun DonateDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("打赏支持") },
+        text = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("感谢你使用炒股记账本！欢迎支付宝扫码请作者喝杯咖啡 ☕")
+                Spacer(Modifier.height(10.dp))
+                Image(
+                    painter = painterResource(R.drawable.donate_qr),
+                    contentDescription = "支付宝赞赏码",
+                    modifier = Modifier.size(220.dp)
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "请核对收款方为「飞哥杂货铺」；非官方版本（签名指纹不符）请勿转账。",
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.error,
+                    textAlign = TextAlign.Center
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("好的") } }
+    )
 }
 
 // ---------------- 费率设置弹窗 ----------------
