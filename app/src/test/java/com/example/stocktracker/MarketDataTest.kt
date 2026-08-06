@@ -147,6 +147,56 @@ class SectorMapTest {
         assertEquals(2, gaps.size)
     }
 
+    @org.junit.Test
+    fun 分时数据_解析与均价推导() {
+        val json = """{"code":0,"msg":"","data":{"sz159915":{"data":{"data":[
+            "0930 3.497 100 500.00",
+            "0931 3.510 300 1500.00",
+            "1130 3.520 400 2050.00",
+            "1300 3.530 600 3150.00"
+        ]}}}}"""
+        val pts = parseMinuteData(json)!!
+        assertEquals(4, pts.size)
+        assertEquals(0, pts[0].minute)          // 9:30 → 0
+        assertEquals(1, pts[1].minute)          // 9:31 → 1
+        assertEquals(120, pts[2].minute)        // 11:30 → 120
+        assertEquals(210, pts[3].minute)        // 13:00 → 210（跳过午休）
+        assertEquals(3.497, pts[0].price, 0.0001)
+        // 均价 = 累计额 /（累计量手 × 100）
+        assertEquals(500.0 / (100 * 100.0), pts[0].avgPrice, 0.0001)
+        assertEquals(1500.0 / (300 * 100.0), pts[1].avgPrice, 0.0001)
+    }
+
+    @org.junit.Test
+    fun 分时数据_异常返回null或空() {
+        assertNull(parseMinuteData("not json"))
+        assertNull(parseMinuteData("""{"code":1,"data":{}}"""))
+        assertNull(parseMinuteData("""{"code":0,"data":{"sz159915":{"data":{"data":[]}}}}"""))
+    }
+
+    @org.junit.Test
+    fun 分钟索引_非法输入返回null() {
+        assertNull(parseMinuteIndex(""))
+        assertNull(parseMinuteIndex("093"))
+        assertNull(parseMinuteIndex("0830"))
+        assertNull(parseMinuteIndex("1600"))
+        assertEquals(0, parseMinuteIndex("0930")!!)
+    }
+
+    @org.junit.Test
+    fun 分钟索引_时间戳转换() {
+        fun at(h: Int, m: Int): Long = java.util.Calendar.getInstance().apply {
+            set(java.util.Calendar.HOUR_OF_DAY, h)
+            set(java.util.Calendar.MINUTE, m)
+            set(java.util.Calendar.SECOND, 0)
+        }.timeInMillis
+        assertEquals(0, minuteIndexOf(at(9, 30)))
+        assertEquals(30, minuteIndexOf(at(10, 0)))
+        assertEquals(210, minuteIndexOf(at(13, 0)))
+        assertEquals(239, minuteIndexOf(at(15, 0)))      // 收盘收敛
+        assertEquals(0, minuteIndexOf(at(8, 0)))         // 开盘前收敛
+    }
+
     private fun rawOf(code: String, name: String, pct: String, key: String): String {
         val fields = MutableList(40) { "" }
         fields[1] = name; fields[2] = code

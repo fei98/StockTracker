@@ -26,6 +26,30 @@ class StockViewModel(
     var feeConfig: FeeConfig = initialFeeConfig ?: feeStore?.load() ?: FeeConfig()
         private set
 
+    /** 今日分时数据（按当前选中股票，弹窗内缓存） */
+    private val _intraday = MutableStateFlow<List<MinutePoint>?>(null)
+    val intraday: StateFlow<List<MinutePoint>?> = _intraday.asStateFlow()
+
+    /** 分时加载中 */
+    private val _intradayLoading = MutableStateFlow(false)
+    val intradayLoading: StateFlow<Boolean> = _intradayLoading.asStateFlow()
+
+    private var intradayStockKey: String? = null
+
+    /** 加载当前选中股票的今日分时（切股后首次点分时重新拉取；force=true 忽略缓存强制刷新） */
+    fun loadIntraday(force: Boolean = false) {
+        val stock = _state.value.selected?.stock ?: return
+        if (_intradayLoading.value) return
+        if (!force && intradayStockKey == stock.marketCode) return // 已缓存该股
+        _intradayLoading.value = true
+        viewModelScope.launch {
+            val data = withContext(Dispatchers.IO) { api.fetchIntraday(stock) }
+            _intraday.value = data
+            intradayStockKey = if (data != null) stock.marketCode else null
+            _intradayLoading.value = false
+        }
+    }
+
     private var nextId = 1L
     private var searchSeq = 0
 

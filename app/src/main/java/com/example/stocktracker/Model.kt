@@ -179,6 +179,30 @@ data class QuoteResult(
     val prevClose: Double? = null
 )
 
+/**
+ * 今日分时点（腾讯 minute/query）：累计量单位为"手"（1手=100股）。
+ * @param minute 分钟索引（0 = 9:30，每分钟 +1；午休不连续）
+ * @param price 该分钟价格
+ * @param cumVolume 累计成交量（手）
+ * @param cumAmount 累计成交额
+ */
+data class MinutePoint(
+    val minute: Int,
+    val price: Double,
+    val cumVolume: Long,
+    val cumAmount: Double
+) {
+    /** 到该分钟的均价 = 累计额 / 累计股数（累计量×100），累计量为 0 时退回现价 */
+    val avgPrice: Double get() = if (cumVolume > 0) cumAmount / (cumVolume * 100.0) else price
+}
+
+/** 交易时间戳 → 分时分钟索引（0=9:30，午休跳过，越界收敛到 [0,239]） */
+fun minuteIndexOf(time: Long): Int {
+    val cal = Calendar.getInstance().apply { timeInMillis = time }
+    val idx = (cal.get(Calendar.HOUR_OF_DAY) - 9) * 60 + cal.get(Calendar.MINUTE) - 30
+    return idx.coerceIn(0, 239)
+}
+
 data class StockState(
     val accounts: List<StockAccount> = emptyList(),
     val selectedIndex: Int = -1,

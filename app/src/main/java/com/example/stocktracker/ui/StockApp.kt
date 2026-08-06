@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PieChart
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -70,19 +71,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.foundation.clickable
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.stocktracker.FeeConfig
 import com.example.stocktracker.FeeConfigStore
+import com.example.stocktracker.MinutePoint
 import com.example.stocktracker.OverviewEntry
 import com.example.stocktracker.OverviewTab
 import com.example.stocktracker.PredictionEngine
@@ -102,7 +107,9 @@ import com.example.stocktracker.overviewEntries
 import com.example.stocktracker.formatMoney
 import com.example.stocktracker.formatPrice
 import com.example.stocktracker.formatTime
+import com.example.stocktracker.isSameDay
 import com.example.stocktracker.isValidCodeInput
+import com.example.stocktracker.minuteIndexOf
 import com.example.stocktracker.ui.theme.DownColor
 import com.example.stocktracker.ui.theme.StockTrackerTheme
 import com.example.stocktracker.ui.theme.UpColor
@@ -140,6 +147,9 @@ fun StockApp() {
     var deleteTarget by remember { mutableStateOf<Pair<Int, String>?>(null) }
     var showOverview by remember { mutableStateOf(false) }
     var showFeeSettings by remember { mutableStateOf(false) }
+    var showIntradayDialog by remember { mutableStateOf(false) }
+    val intraday by vm.intraday.collectAsStateWithLifecycle()
+    val intradayLoading by vm.intradayLoading.collectAsStateWithLifecycle()
 
     val notifLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -234,7 +244,11 @@ fun StockApp() {
                         SummaryCard(
                             acc,
                             onEditPrice = { showPriceDialog = true },
-                            onRefresh = vm::refreshPrice
+                            onRefresh = vm::refreshPrice,
+                            onIntraday = {
+                                vm.loadIntraday()
+                                showIntradayDialog = true
+                            }
                         )
                     }
                     item {
@@ -339,6 +353,27 @@ fun StockApp() {
             current = vm.feeConfig,
             onSave = { vm.updateFeeConfig(it); showFeeSettings = false },
             onDismiss = { showFeeSettings = false }
+        )
+    }
+
+    if (showIntradayDialog && acc != null) {
+        val now = System.currentTimeMillis()
+        // 今日买卖点（用于分时图标记）
+        val todayBuys = acc.trades
+            .filter { it.type == TradeType.BUY && isSameDay(it.time, now) }
+            .map { minuteIndexOf(it.time) to it.price }
+        val todaySells = acc.trades
+            .filter { it.type == TradeType.SELL && isSameDay(it.time, now) }
+            .map { minuteIndexOf(it.time) to it.price }
+        IntradayDialog(
+            points = intraday,
+            loading = intradayLoading,
+            prevClose = acc.prevClose,
+            stockName = acc.stock.name,
+            buys = todayBuys,
+            sells = todaySells,
+            onRefresh = { vm.loadIntraday(force = true) },
+            onDismiss = { showIntradayDialog = false }
         )
     }
 
@@ -705,7 +740,7 @@ private fun signedMoney(v: Double): String = if (v >= 0) "+${formatMoney(v)}" el
 
 // ---------------- 概览卡片 ----------------
 @Composable
-private fun SummaryCard(acc: StockAccount, onEditPrice: () -> Unit, onRefresh: () -> Unit) {
+private fun SummaryCard(acc: StockAccount, onEditPrice: () -> Unit, onRefresh: () -> Unit, onIntraday: () -> Unit) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primary)) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(
@@ -717,6 +752,14 @@ private fun SummaryCard(acc: StockAccount, onEditPrice: () -> Unit, onRefresh: (
                     color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp,
                     modifier = Modifier.weight(1f)
                 )
+                IconButton(onClick = onIntraday) {
+                    Icon(
+                        Icons.Default.ShowChart,
+                        contentDescription = "今日分时",
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
                 IconButton(onClick = onRefresh) {
                     Icon(
                         Icons.Default.Refresh,
@@ -1079,6 +1122,131 @@ private fun ClearDialog(onClearSelected: () -> Unit, onClearAll: () -> Unit, onD
             }
         }
     )
+}
+
+// ---------------- 今日分时图弹窗 ----------------
+@Composable
+private fun IntradayDialog(
+    points: List<MinutePoint>?,
+    loading: Boolean,
+    prevClose: Double?,
+    stockName: String,
+    buys: List<Pair<Int, Double>>,
+    sells: List<Pair<Int, Double>>,
+    onRefresh: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    // 弹窗打开期间每 10 秒自动刷新分时数据（关闭即取消）
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(10_000)
+            onRefresh()
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("$stockName 分时") },
+        text = {
+            when {
+                loading && points == null -> HintText("分时加载中…")
+                points == null -> HintText("分时数据获取失败，请检查网络")
+                else -> IntradayChart(points, prevClose, buys, sells)
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+    )
+}
+
+/** 分时图：价格线 + 均价线 + 昨收虚线 + 今日买卖点标记 + 时间刻度（红涨绿跌） */
+@Composable
+private fun IntradayChart(points: List<MinutePoint>, prevClose: Double?, buys: List<Pair<Int, Double>>, sells: List<Pair<Int, Double>>) {
+    val prices = points.flatMap { listOf(it.price, it.avgPrice) } + listOfNotNull(prevClose)
+    val minP = prices.minOrNull() ?: 0.0
+    val maxP = prices.maxOrNull() ?: 0.0
+    val range = (maxP - minP).coerceAtLeast(0.0001)
+    val priceLineColor = Color(0xFF8E24AA)   // 价格线：紫色（同花顺风格）
+    val avgColor = Color(0xFFFFC107)         // 均价线：黄色（同花顺风格）
+    val gridColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+    val dashColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
+
+    Column {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("昨收 ${prevClose?.let { formatPrice(it) } ?: "—"}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+            Text("最高 ${formatPrice(maxP)}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+            Text("最低 ${formatPrice(minP)}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+        }
+        Spacer(Modifier.height(4.dp))
+        Canvas(Modifier.fillMaxWidth().height(200.dp)) {
+            val padTop = 6.dp.toPx()
+            val padBottom = 4.dp.toPx()
+            val chartH = size.height - padTop - padBottom
+            val w = size.width
+            val n = 240 // 全天分钟数
+            fun x(minute: Int): Float = minute.toFloat() / n * w
+            fun y(price: Double): Float = padTop + ((maxP - price) / range * chartH).toFloat()
+
+            // 竖向网格线（9:30 / 10:30 / 11:30 / 14:00 / 15:00）
+            listOf(0, 60, 120, 210, 240).forEach { m ->
+                drawLine(
+                    color = gridColor,
+                    start = Offset(x(m), padTop),
+                    end = Offset(x(m), size.height - padBottom),
+                    strokeWidth = 1.dp.toPx()
+                )
+            }
+            // 昨收虚线
+            if (prevClose != null) {
+                drawLine(
+                    color = dashColor,
+                    start = Offset(0f, y(prevClose)),
+                    end = Offset(w, y(prevClose)),
+                    strokeWidth = 1.dp.toPx(),
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f))
+                )
+            }
+            // 均价线
+            val avgPath = Path()
+            points.forEachIndexed { i, p ->
+                val px = x(p.minute)
+                val py = y(p.avgPrice)
+                if (i == 0) avgPath.moveTo(px, py) else avgPath.lineTo(px, py)
+            }
+            drawPath(avgPath, color = avgColor, style = Stroke(width = 1.5.dp.toPx()))
+            // 价格线（紫色整条，同花顺风格）
+            val singlePath = Path()
+            points.forEachIndexed { i, p ->
+                val px = x(p.minute)
+                val py = y(p.price)
+                if (i == 0) singlePath.moveTo(px, py) else singlePath.lineTo(px, py)
+            }
+            drawPath(singlePath, color = priceLineColor, style = Stroke(width = 2.dp.toPx()))
+            // 今日买入点标记（白圈 + 红点）
+            buys.forEach { (minute, price) ->
+                val px = x(minute.coerceIn(0, 240))
+                val py = y(price)
+                drawCircle(color = Color.White, radius = 5.dp.toPx(), center = Offset(px, py))
+                drawCircle(color = UpColor, radius = 3.2.dp.toPx(), center = Offset(px, py))
+            }
+            // 今日卖出点标记（白圈 + 绿点，同花顺风格：红买绿卖）
+            sells.forEach { (minute, price) ->
+                val px = x(minute.coerceIn(0, 240))
+                val py = y(price)
+                drawCircle(color = Color.White, radius = 5.dp.toPx(), center = Offset(px, py))
+                drawCircle(color = DownColor, radius = 3.2.dp.toPx(), center = Offset(px, py))
+            }
+        }
+        // 时间刻度
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            listOf("9:30", "10:30", "11:30", "14:00", "15:00").forEach { label ->
+                Text(label, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+            }
+        }
+        Spacer(Modifier.height(2.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("价格线", fontSize = 10.sp, color = priceLineColor)
+            Text("均价线", fontSize = 10.sp, color = avgColor)
+        }
+    }
 }
 
 // ---------------- 账户总览（并列标签：浮盈/市值/已实现/预测） ----------------

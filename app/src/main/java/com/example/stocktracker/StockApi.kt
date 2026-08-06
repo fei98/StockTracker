@@ -105,4 +105,53 @@ open class StockApi(
 
     /** 按完整代码取原始行情文本（预测模块用），失败返回 null */
     open suspend fun fetchRaw(query: String): String? = fetch(query)
+
+    /**
+     * 今日分时数据（分钟点列表，时间从 9:30 起）。
+     * 数据行："0930 3.497 166308 58157907.60"（时间 价格 累计量 累计额）
+     */
+    open suspend fun fetchIntraday(stock: Stock): List<MinutePoint>? {
+        val raw = fetchMinute(stock) ?: return null
+        return parseMinuteData(raw)
+    }
+
+    private suspend fun fetchMinute(stock: Stock): String? = withContext(Dispatchers.IO) {
+        runCatching {
+            val req = Request.Builder()
+                .url("https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=${stock.marketCode}")
+                .build()
+            client.newCall(req).execute().use { resp -> resp.body?.string() }
+        }.getOrNull()
+    }
+}
+
+/**
+ * 解析今日分时（腾讯 minute/query，纯字符串/正则，不依赖 org.json 便于单测）。
+ * 结构：{"code":0,...,"data":{"sz159915":{"data":{"data":["0930 3.497 166308 58157907.60",...]}}}}
+ */
+fun parseMinuteData(raw: String): List<MinutePoint>? {
+    // 取第一处 `"data": [ ... ]`（外层包裹对象与行情块都是 `{}`，会跳过）
+    val arrMatch = Regex("\"data\"\\s*:\\s*(\\[.*?\\])", RegexOption.DOT_MATCHES_ALL).find(raw)
+        ?: return null
+    val tokens = Regex("\"(\\d{4})\\s+([\\d.]+)\\s+(\\d+)\\s+([\\d.]+)\"")
+        .findAll(arrMatch.groupValues[1])
+    val points = tokens.mapNotNull { m ->
+        val g = m.groupValues
+        val minute = parseMinuteIndex(g[1]) ?: return@mapNotNull null
+        val price = g[2].toDoubleOrNull() ?: return@mapNotNull null
+        val vol = g[3].toLongOrNull() ?: return@mapNotNull null
+        val amt = g[4].toDoubleOrNull() ?: return@mapNotNull null
+        MinutePoint(minute, price, vol, amt)
+    }.toList()
+    return points.takeIf { it.isNotEmpty() }
+}
+
+/** "0930" → 分钟索引（0 = 9:30）；"1130" → 120；午休后 "1300" → 210（跳过 11:30-13:00 的 90 分钟） */
+fun parseMinuteIndex(hhmm: String): Int? {
+    if (hhmm.length != 4) return null
+    val h = hhmm.substring(0, 2).toIntOrNull() ?: return null
+    val m = hhmm.substring(2, 4).toIntOrNull() ?: return null
+    if (h < 9 || h > 15) return null
+    val idx = (h - 9) * 60 + m - 30
+    return if (idx >= 0) idx else null
 }
