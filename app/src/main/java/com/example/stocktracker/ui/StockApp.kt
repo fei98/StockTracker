@@ -1353,6 +1353,8 @@ private fun PredictionPanel(predUi: PredictionViewModel.UiState, onPredictAll: (
 
 @Composable
 private fun DonutChart(entries: List<OverviewEntry>, tab: OverviewTab, total: Double) {
+    // 中心合计 = 真实符号求和（赚亏相抵）；total 用于画弧/占比（绝对值）
+    val signedTotal = entries.sumOf { it.value }
     Box(Modifier.fillMaxWidth().padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
         Canvas(Modifier.size(170.dp)) {
             val stroke = 34.dp.toPx()
@@ -1374,7 +1376,7 @@ private fun DonutChart(entries: List<OverviewEntry>, tab: OverviewTab, total: Do
         }
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(tab.label, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
-            Text("合计 ${signedMoney(total)}", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+            Text("合计 ${signedMoney(signedTotal)}", fontWeight = FontWeight.Bold, fontSize = 15.sp)
         }
     }
 }
