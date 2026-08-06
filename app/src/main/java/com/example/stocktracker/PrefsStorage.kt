@@ -49,6 +49,7 @@ private fun buildState(s: StockState): String {
                     .put("originalQty", lot.originalQty)
                     .put("remainingQty", lot.remainingQty)
                     .put("time", lot.time)
+                    .put("fee", lot.fee)
             )
         }
         val trades = JSONArray()
@@ -61,6 +62,8 @@ private fun buildState(s: StockState): String {
                     .put("qty", t.qty)
                     .put("profit", t.profit)
                     .put("time", t.time)
+                    .put("fee", t.fee)
+                    .put("costFee", t.costFee)
             )
         }
         accounts.put(
@@ -70,6 +73,7 @@ private fun buildState(s: StockState): String {
                 .put("market", acc.stock.market)
                 .put("currentPrice", acc.currentPrice ?: JSONObject.NULL)
                 .put("prevClose", acc.prevClose ?: JSONObject.NULL)
+                .put("totalBuyFee", acc.totalBuyFee)
                 .put("holdings", lots)
                 .put("trades", trades)
         )
@@ -87,13 +91,13 @@ private fun parseState(raw: String): StockState {
         val holdingsArr = a.getJSONArray("holdings")
         for (j in 0 until holdingsArr.length()) {
             val l = holdingsArr.getJSONObject(j)
-            holdings.add(BuyLot(l.getLong("id"), l.getDouble("price"), l.getInt("originalQty"), l.getInt("remainingQty"), l.optLong("time", 0L)))
+            holdings.add(BuyLot(l.getLong("id"), l.getDouble("price"), l.getInt("originalQty"), l.getInt("remainingQty"), l.optLong("time", 0L), l.optDouble("fee", 0.0)))
         }
         val trades = mutableListOf<TradeRecord>()
         val tradesArr = a.getJSONArray("trades")
         for (j in 0 until tradesArr.length()) {
             val t = tradesArr.getJSONObject(j)
-            trades.add(TradeRecord(t.getLong("id"), TradeType.valueOf(t.getString("type")), t.getDouble("price"), t.getInt("qty"), t.getDouble("profit"), t.getLong("time")))
+            trades.add(TradeRecord(t.getLong("id"), TradeType.valueOf(t.getString("type")), t.getDouble("price"), t.getInt("qty"), t.getDouble("profit"), t.getLong("time"), t.optDouble("fee", 0.0), t.optDouble("costFee", 0.0)))
         }
         accounts.add(
             StockAccount(
@@ -101,7 +105,8 @@ private fun parseState(raw: String): StockState {
                 holdings = holdings,
                 trades = trades,
                 currentPrice = if (a.isNull("currentPrice")) null else a.getDouble("currentPrice"),
-                prevClose = if (a.isNull("prevClose")) null else a.getDouble("prevClose")
+                prevClose = if (a.isNull("prevClose")) null else a.getDouble("prevClose"),
+                totalBuyFee = a.optDouble("totalBuyFee", 0.0)
             )
         )
     }

@@ -18,6 +18,7 @@ class PredictionViewModel(
         val stock: Stock? = null,
         val running: Boolean = false,
         val result: PredictionResult? = null,
+        val allResults: List<PredictionResult> = emptyList(),
         val observation: ObservationInfo? = null,
         val inObservationPhase: Boolean = false,
         val stats: Map<TargetType, WalkForwardStats> = emptyMap(),
@@ -80,6 +81,33 @@ class PredictionViewModel(
                 )
             }
             refresh(stock)
+        }
+    }
+
+    /** 一键预测全部 A 股持仓（结果展示在账户总览） */
+    fun predictAll(accounts: List<StockAccount>) {
+        if (PredictionEngine.isObservationPhase(System.currentTimeMillis())) {
+            _ui.update { it.copy(error = "当前为竞价观察区（9:15–9:20），9:20 后可预测") }
+            return
+        }
+        if (_ui.value.running) return
+        val stocks = accounts.filter { PredictionEngine.isPredictable(it.stock) }
+        if (stocks.isEmpty()) {
+            _ui.update { it.copy(error = "没有可预测的 A 股持仓") }
+            return
+        }
+        viewModelScope.launch {
+            _ui.update { it.copy(running = true, error = null) }
+            val results = stocks.mapNotNull { acc ->
+                engine.runPrediction(acc.stock, hasPosition = acc.totalQty > 0)
+            }
+            _ui.update {
+                it.copy(
+                    running = false,
+                    allResults = results,
+                    error = if (results.isEmpty()) "预测失败：行情获取异常，请检查网络后重试" else null
+                )
+            }
         }
     }
 }

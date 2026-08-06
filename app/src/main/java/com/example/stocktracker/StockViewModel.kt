@@ -14,29 +14,48 @@ import kotlinx.coroutines.withContext
 
 class StockViewModel(
     private val storage: Storage? = null,
-    private val api: StockApi = StockApi()
+    private val api: StockApi = StockApi(),
+    private val feeStore: FeeConfigStore? = null,
+    initialFeeConfig: FeeConfig? = null
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(StockState())
     val state: StateFlow<StockState> = _state.asStateFlow()
 
+    /** 当前费率配置（内存态；feeStore 非空时持久化） */
+    var feeConfig: FeeConfig = initialFeeConfig ?: feeStore?.load() ?: FeeConfig()
+        private set
+
     private var nextId = 1L
     private var searchSeq = 0
+
+    /** 更新费率设置 */
+    fun updateFeeConfig(c: FeeConfig) {
+        feeConfig = c
+        feeStore?.save(c)
+        notify("已更新费率设置（历史记录费用不回算，仅影响之后的操作）")
+    }
 
     init {
         storage?.let { restore(it) }
     }
 
-    /** 启动时从持久化存储恢复数据 */
+    /** 启动时从持久化存储恢复数据；并做一次性历史手续费重算迁移 */
     private fun restore(storage: Storage) {
         viewModelScope.launch {
-            val s = storage.load()
+            var s = storage.load()
+            // 一次性迁移：旧数据（费用功能上线前）手续费为 0，用当前费率重算补齐
+            if (feeStore != null && feeStore.needsFeeMigration()) {
+                s = recalcHistoricalFees(s, feeConfig)
+                feeStore.markFeeMigrated()
+            }
             _state.value = s
             nextId = maxOf(
                 s.accounts.flatMap { it.holdings.map { h -> h.id } }.maxOrNull() ?: 0L,
                 s.accounts.flatMap { it.trades.map { t -> t.id } }.maxOrNull() ?: 0L
             ) + 1
             _state.update { it.copy(message = if (s.accounts.isNotEmpty()) "已恢复上次保存的数据" else null) }
+            if (s.accounts.isNotEmpty()) persist()
         }
     }
 
@@ -180,16 +199,18 @@ class StockViewModel(
         if (price <= 0 || qty <= 0) { notify("请输入正确的单价和数量"); return }
         val idx = _state.value.selectedIndex
         if (idx < 0) { notify("请先添加并选择股票"); return }
-        val lot = BuyLot(id = nextId++, price = price, originalQty = qty, remainingQty = qty, time = time)
+        val buyFee = feeConfig.buyFee(price * qty)
+        val lot = BuyLot(id = nextId++, price = price, originalQty = qty, remainingQty = qty, time = time, fee = buyFee)
         _state.update { s ->
             s.copy(
                 accounts = updateSelected(s) { a ->
                     a.copy(
                         holdings = a.holdings + lot,
-                        trades = a.trades + TradeRecord(nextId++, TradeType.BUY, price, qty)
+                        trades = a.trades + TradeRecord(nextId++, TradeType.BUY, price, qty, fee = buyFee),
+                        totalBuyFee = a.totalBuyFee + buyFee
                     )
                 },
-                message = "买入成功：${formatPrice(price)} 元 × $qty 股"
+                message = "买入成功：${formatPrice(price)} 元 × $qty 股（手续费 ${formatMoney(buyFee)} 元）"
             )
         }
         persist()
@@ -211,6 +232,7 @@ class StockViewModel(
         val sellableIds = acc.sellableHoldings.map { it.id }.toSet()
         var toSell = qty
         var profit = 0.0
+        var costFee = 0.0   // 被卖出批次分摊的买入手续费
         val remaining = mutableListOf<BuyLot>()
 
         // 冻结批次（当日买入）原样保留，不参与卖出
@@ -222,20 +244,22 @@ class StockViewModel(
             }
             val take = minOf(lot.remainingQty, toSell)
             profit += (price - lot.price) * take
+            if (lot.originalQty > 0) costFee += lot.fee * take / lot.originalQty
             toSell -= take
             val left = lot.remainingQty - take
             if (left > 0) remaining.add(lot.copy(remainingQty = left))
         }
 
+        val sellFee = feeConfig.sellFee(price * qty)
         _state.update {
             it.copy(
                 accounts = updateSelected(it) { a ->
                     a.copy(
                         holdings = remaining,
-                        trades = a.trades + TradeRecord(nextId++, TradeType.SELL, price, qty, profit)
+                        trades = a.trades + TradeRecord(nextId++, TradeType.SELL, price, qty, profit, fee = sellFee, costFee = costFee)
                     )
                 },
-                message = "卖出成功：${formatPrice(price)} 元 × $qty 股，本次盈利 ${formatMoney(profit)} 元"
+                message = "卖出成功：${formatPrice(price)} 元 × $qty 股，净盈亏 ${formatMoney(profit - sellFee - costFee)} 元（费用 ${formatMoney(sellFee + costFee)} 元）"
             )
         }
         persist()

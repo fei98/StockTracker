@@ -193,8 +193,7 @@ class PredictionEngineTest {
     }
 
     @org.junit.Test
-    fun 投票序列_缓存一致且记录变化后重算() = runTest {
-        val store = FakeSnapshotStore()
+    fun 投票序列_缓存一致且记录变化后重算() = runTest {        val store = FakeSnapshotStore()
         storeWithBaseline(store)
         val engine = PredictionEngine(snapOf(MarketSnapshot(quote(), null, emptyList(), emptyList())), store)
         // 积累 25 天记录并回填结果

@@ -5,7 +5,9 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -29,7 +31,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.PieChart
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -50,6 +54,7 @@ import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -70,10 +75,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.foundation.clickable
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.stocktracker.FeeConfig
+import com.example.stocktracker.FeeConfigStore
+import com.example.stocktracker.OverviewEntry
+import com.example.stocktracker.OverviewTab
 import com.example.stocktracker.PredictionEngine
 import com.example.stocktracker.PredictionOutcome
 import com.example.stocktracker.PredictionViewModel
@@ -87,6 +98,7 @@ import com.example.stocktracker.StockViewModel
 import com.example.stocktracker.TargetType
 import com.example.stocktracker.TencentMarketDataApi
 import com.example.stocktracker.TradeType
+import com.example.stocktracker.overviewEntries
 import com.example.stocktracker.formatMoney
 import com.example.stocktracker.formatPrice
 import com.example.stocktracker.formatTime
@@ -103,7 +115,7 @@ import kotlinx.coroutines.launch
 fun StockApp() {
     val context = LocalContext.current
     val vm: StockViewModel = viewModel {
-        StockViewModel(PrefsStorage(context))
+        StockViewModel(PrefsStorage(context), feeStore = FeeConfigStore(context))
     }
     val state by vm.state.collectAsStateWithLifecycle()
     val acc = state.selected
@@ -127,6 +139,8 @@ fun StockApp() {
     var showPredDetail by remember { mutableStateOf(false) }
     var showSectorPicker by remember { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<Pair<Int, String>?>(null) }
+    var showOverview by remember { mutableStateOf(false) }
+    var showFeeSettings by remember { mutableStateOf(false) }
 
     val notifLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -160,7 +174,23 @@ fun StockApp() {
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = MaterialTheme.colorScheme.primary,
                         titleContentColor = MaterialTheme.colorScheme.onPrimary
-                    )
+                    ),
+                    actions = {
+                        IconButton(onClick = { showOverview = true }) {
+                            Icon(
+                                Icons.Default.PieChart,
+                                contentDescription = "账户总览",
+                                tint = MaterialTheme.colorScheme.onPrimary
+                            )
+                        }
+                        IconButton(onClick = { showFeeSettings = true }) {
+                            Icon(
+                                Icons.Default.Settings,
+                                contentDescription = "费率设置",
+                                tint = MaterialTheme.colorScheme.onPrimary
+                            )
+                        }
+                    }
                 )
             }
         ) { padding ->
@@ -293,6 +323,26 @@ fun StockApp() {
                 }) { Text("删除", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("取消") } }
+        )
+    }
+
+    if (showOverview) {
+        OverviewDialog(
+            accounts = state.accounts,
+            predUi = predUi,
+            onPredictAll = {
+                requestNotifPermissionIfNeeded()
+                predVm.predictAll(state.accounts)
+            },
+            onDismiss = { showOverview = false }
+        )
+    }
+
+    if (showFeeSettings) {
+        FeeSettingsDialog(
+            current = vm.feeConfig,
+            onSave = { vm.updateFeeConfig(it); showFeeSettings = false },
+            onDismiss = { showFeeSettings = false }
         )
     }
 
@@ -722,7 +772,7 @@ private fun SummaryCard(acc: StockAccount, onEditPrice: () -> Unit, onRefresh: (
                 }
                 InfoCol("市值", if (acc.currentPrice != null) "¥${formatMoney(acc.marketValue)}" else "—")
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("浮动盈亏", color = Color.White.copy(alpha = 0.8f), fontSize = 11.sp)
+                    Text("浮盈·含费", color = Color.White.copy(alpha = 0.8f), fontSize = 11.sp)
                     val pnlColorValue = if (acc.currentPrice != null) {
                         if (acc.totalPnl > 0.0001) Color(0xFFFFCDD2)
                         else if (acc.totalPnl < -0.0001) Color(0xFFC8E6C9)
@@ -995,7 +1045,7 @@ private fun TradeRow(t: com.example.stocktracker.TradeRecord) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Column {
+        Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     Modifier
@@ -1020,9 +1070,19 @@ private fun TradeRow(t: com.example.stocktracker.TradeRecord) {
             )
         }
         if (t.type == TradeType.SELL) {
+            Column(horizontalAlignment = Alignment.End) {
+                Text(
+                    "${if (t.netProfit >= 0) "+" else ""}${formatMoney(t.netProfit)}",
+                    color = pnlColor(t.netProfit), fontWeight = FontWeight.Bold
+                )
+                if (t.fee > 0) {
+                    Text("手续费 ¥${formatMoney(t.fee)}", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                }
+            }
+        } else if (t.fee > 0) {
             Text(
-                "${if (t.profit >= 0) "+" else ""}${formatMoney(t.profit)}",
-                color = pnlColor(t.profit), fontWeight = FontWeight.Bold
+                "手续费 ¥${formatMoney(t.fee)}",
+                fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
             )
         }
     }
@@ -1041,6 +1101,229 @@ private fun ClearDialog(onClearSelected: () -> Unit, onClearAll: () -> Unit, onD
                 TextButton(onClick = onClearAll) { Text("清空全部股票") }
                 TextButton(onClick = onDismiss) { Text("取消") }
             }
+        }
+    )
+}
+
+// ---------------- 账户总览（并列标签：浮盈/市值/已实现/预测） ----------------
+@Composable
+private fun OverviewDialog(
+    accounts: List<StockAccount>,
+    predUi: PredictionViewModel.UiState,
+    onPredictAll: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val dataTabs = OverviewTab.entries.toList()
+    val tabLabels = dataTabs.map { it.label } + "预测"
+    var selected by remember { mutableStateOf(0) }
+    val isPredict = selected >= dataTabs.size
+    val dataTab = if (!isPredict) dataTabs[selected] else null
+    // 按 |值| 从大到小排序展示（市值即按大小，浮盈/已实现按绝对值）
+    val entries = remember(accounts, dataTab) {
+        if (dataTab == null) emptyList()
+        else overviewEntries(accounts, dataTab).sortedByDescending { kotlin.math.abs(it.value) }
+    }
+    val total = entries.sumOf { kotlin.math.abs(it.value) }
+    // 进入"预测"标签自动触发一次预测
+    LaunchedEffect(isPredict) {
+        if (isPredict) onPredictAll()
+    }
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 620.dp)
+        ) {
+            Column(Modifier.padding(16.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("账户总览", fontWeight = FontWeight.Bold, fontSize = 16.sp, modifier = Modifier.weight(1f))
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "关闭")
+                    }
+                }
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    tabLabels.forEachIndexed { i, label ->
+                        SegmentedButton(
+                            selected = selected == i,
+                            onClick = { selected = i },
+                            shape = SegmentedButtonDefaults.itemShape(index = i, count = tabLabels.size)
+                        ) { Text(label, fontSize = 12.sp) }
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+                if (isPredict) {
+                    PredictionPanel(predUi, onPredictAll)
+                } else if (accounts.isEmpty()) {
+                    EmptyText("暂无股票数据")
+                } else {
+                    DonutChart(entries, dataTab!!, total)
+                    HorizontalDivider()
+                    LazyColumn(Modifier.heightIn(max = 220.dp)) {
+                        items(entries) { e ->
+                            OverviewLegendRow(e, dataTab, total, entries.indexOf(e))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PredictionPanel(predUi: PredictionViewModel.UiState, onPredictAll: () -> Unit) {
+    Column {
+        Button(
+            onClick = onPredictAll,
+            enabled = !predUi.running,
+            modifier = Modifier.fillMaxWidth()
+        ) { Text(if (predUi.running) "预测中…" else "一键预测全部 A 股", fontSize = 13.sp) }
+        Spacer(Modifier.height(8.dp))
+        if (predUi.allResults.isEmpty()) {
+            HintText(predUi.error ?: "9:20 后点击获取全部持仓的竞价预测")
+        } else {
+            LazyColumn(Modifier.heightIn(max = 360.dp)) {
+                items(predUi.allResults) { r ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(r.stockName, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                        Text(
+                            "${r.conclusion.label} ${signedPct(r.score)} · 置信${r.confidence}",
+                            fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                            color = when (r.conclusion) {
+                                PredictionOutcome.UP -> UpColor
+                                PredictionOutcome.DOWN -> DownColor
+                                else -> MaterialTheme.colorScheme.onSurface
+                            }
+                        )
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DonutChart(entries: List<OverviewEntry>, tab: OverviewTab, total: Double) {
+    Box(Modifier.fillMaxWidth().padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
+        Canvas(Modifier.size(170.dp)) {
+            val stroke = 34.dp.toPx()
+            var start = -90f
+            val nonZero = entries.filter { it.value != 0.0 }
+            if (total > 0 && nonZero.isNotEmpty()) {
+                nonZero.forEachIndexed { i, e ->
+                    val sweep = (kotlin.math.abs(e.value).toFloat() / total.toFloat()) * 360f
+                    drawArc(
+                        color = overviewColor(e, tab, i),
+                        startAngle = start,
+                        sweepAngle = (sweep - 1.5f).coerceAtLeast(0f),
+                        useCenter = false,
+                        style = Stroke(width = stroke)
+                    )
+                    start += sweep
+                }
+            }
+        }
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(tab.label, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+            Text("合计 ${signedMoney(total)}", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+        }
+    }
+}
+
+private val overviewPalette = listOf(
+    Color(0xFFE53935), Color(0xFF1E88E5), Color(0xFF43A047), Color(0xFFF4511E),
+    Color(0xFF8E24AA), Color(0xFF00897B), Color(0xFFFBC02D), Color(0xFF3949AB),
+    Color(0xFF6D4C41), Color(0xFF00ACC1)
+)
+
+private fun overviewColor(e: OverviewEntry, tab: OverviewTab, index: Int): Color = when (tab) {
+    OverviewTab.VALUE -> overviewPalette[index % overviewPalette.size]
+    else -> if (e.value >= 0) UpColor else DownColor
+}
+
+@Composable
+private fun OverviewLegendRow(e: OverviewEntry, tab: OverviewTab, total: Double, index: Int) {
+    val color = overviewColor(e, tab, index)
+    val pct = if (total > 0) kotlin.math.abs(e.value) / total * 100 else 0.0
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(Modifier.size(10.dp).background(color, RoundedCornerShape(2.dp)))
+        Spacer(Modifier.width(8.dp))
+        Text(e.name, fontSize = 13.sp, modifier = Modifier.weight(1f))
+        val sign = if (e.value > 0 && tab != OverviewTab.VALUE) "+" else ""
+        Text(
+            sign + formatMoney(e.value),
+            fontSize = 13.sp, fontWeight = FontWeight.Bold,
+            color = if (tab == OverviewTab.VALUE) MaterialTheme.colorScheme.onSurface else color
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(String.format("%.1f%%", pct), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+    }
+}
+
+// ---------------- 费率设置弹窗 ----------------
+@Composable
+private fun FeeSettingsDialog(current: FeeConfig, onSave: (FeeConfig) -> Unit, onDismiss: () -> Unit) {
+    var commission by remember { mutableStateOf((current.commissionRate * 10000).toString()) } // 万分之
+    var minCom by remember { mutableStateOf(current.minCommission.toString()) }
+    var stamp by remember { mutableStateOf((current.stampTaxRate * 100).toString()) }          // %
+    var transfer by remember { mutableStateOf((current.transferRate * 10000).toString()) }     // 万分之
+    val numFilter = { t: String -> t.filter { c -> c.isDigit() || c == '.' } }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("费率设置") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                HintText("买入费=佣金+过户费；卖出费=佣金+印花税+过户费。修改仅影响之后的操作。")
+                OutlinedTextField(
+                    value = commission, onValueChange = { commission = numFilter(it) },
+                    label = { Text("佣金（万分之，默认 2.5）") },
+                    singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = minCom, onValueChange = { minCom = numFilter(it) },
+                    label = { Text("最低佣金（元，默认 5）") },
+                    singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = stamp, onValueChange = { stamp = numFilter(it) },
+                    label = { Text("印花税 %（仅卖出，默认 0.05）") },
+                    singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = transfer, onValueChange = { transfer = numFilter(it) },
+                    label = { Text("过户费（万分之，默认 0.1）") },
+                    singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            Row {
+                TextButton(onClick = {
+                    val c = commission.toDoubleOrNull()?.div(10000)
+                    val m = minCom.toDoubleOrNull()
+                    val s = stamp.toDoubleOrNull()?.div(100)
+                    val t = transfer.toDoubleOrNull()?.div(10000)
+                    if (c != null && m != null && s != null && t != null && c >= 0 && m >= 0 && s >= 0 && t >= 0) {
+                        onSave(FeeConfig(c, m, s, t))
+                    }
+                }) { Text("保存") }
+                TextButton(onClick = onDismiss) { Text("取消") }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = { onSave(FeeConfig()); onDismiss() }) { Text("恢复默认") }
         }
     )
 }

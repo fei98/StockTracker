@@ -11,7 +11,10 @@ import org.junit.Test
  */
 class StockViewModelTest {
 
-    private fun newVm() = StockViewModel()
+    private fun newVm() = StockViewModel(initialFeeConfig = ZERO_FEE)
+
+    /** 零费率：本套测试聚焦买卖/盈亏逻辑，费用行为在 FeeTest 单独覆盖 */
+    private val ZERO_FEE = FeeConfig(0.0, 0.0, 0.0, 0.0)
 
     /** 昨天的同一时刻（买入后次日才可卖，用于构造可卖持仓） */
     private val yesterday = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
@@ -175,7 +178,7 @@ class StockViewModelTest {
         assertEquals(TradeType.SELL, sell.type)
         assertEquals(500.0, sell.profit, 0.0001)
         assertEquals(300, sell.qty)
-        assertTrue(vm.state.value.message!!.contains("本次盈利"))
+        assertTrue(vm.state.value.message!!.contains("净盈亏"))
     }
 
     @Test
