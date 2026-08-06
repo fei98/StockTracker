@@ -11,6 +11,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /** 盘中实时信号 UI 状态（当前股票 + 全部持仓） */
@@ -41,6 +43,9 @@ class PredictionViewModel(
     private var indexCacheAt = 0L
     private var indexCachePoints: List<MinutePoint>? = null
 
+    // 指数拉取互斥锁（评审 §1.3⑦）：refreshAll 多股共享同指数代码时，并发只发起一次真实请求
+    private val indexMutex = Mutex()
+
     private var currentJob: Job? = null
     private var currentSeq = 0
     private var allJob: Job? = null
@@ -61,7 +66,9 @@ class PredictionViewModel(
             _ui.update {
                 it.copy(
                     running = false,
-                    signal = pts?.let { p -> IntradaySignalEvaluator.evaluate(p, index, prevClose, hasPosition) },
+                    signal = pts?.let { p ->
+                        IntradaySignalEvaluator.evaluate(p, index, prevClose, hasPosition, System.currentTimeMillis())
+                    },
                     error = if (pts == null) "行情获取失败，请检查网络" else null
                 )
             }
@@ -82,7 +89,9 @@ class PredictionViewModel(
                         val index = fetchIndexPoints(acc.stock)
                         val pts = api.fetchIntraday(acc.stock)
                         val signal = pts?.let {
-                            IntradaySignalEvaluator.evaluate(it, index, acc.prevClose, acc.totalQty > 0)
+                            IntradaySignalEvaluator.evaluate(
+                                it, index, acc.prevClose, acc.totalQty > 0, System.currentTimeMillis()
+                            )
                         }
                         HoldingSignal(acc.stock, signal, acc.prevClose, acc.totalQty > 0)
                     }
@@ -98,11 +107,15 @@ class PredictionViewModel(
             ?: TencentMarketDataApi.FALLBACK_CONFIG.indexCode
         val now = System.currentTimeMillis()
         if (indexCacheCode == code && now - indexCacheAt < 60_000) return indexCachePoints
-        val indexStock = Stock(code = code.substring(2), name = "", market = code.substring(0, 2))
-        val pts = api.fetchIntraday(indexStock)
-        indexCacheCode = code
-        indexCacheAt = now
-        indexCachePoints = pts
-        return pts
+        return indexMutex.withLock {
+            val now2 = System.currentTimeMillis()
+            if (indexCacheCode == code && now2 - indexCacheAt < 60_000) return@withLock indexCachePoints
+            val indexStock = Stock(code = code.substring(2), name = "", market = code.substring(0, 2))
+            val pts = api.fetchIntraday(indexStock)
+            indexCacheCode = code
+            indexCacheAt = now2
+            indexCachePoints = pts
+            pts
+        }
     }
 }

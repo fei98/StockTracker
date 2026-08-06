@@ -1,5 +1,6 @@
 package com.example.stocktracker
 
+import java.util.Calendar
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -176,4 +177,83 @@ class IntradaySignalTest {
         assertEquals(IntradayAction.NO_TRADE, s2.action)
         assertTrue(s2.reasons.any { it.contains("午间休市") })
     }
+
+    /** 13. AFTERNOON 分支（评审 §1.4⑪）：完整上午 121 点 + 午后 ≥31 点 → 正常出 BUY/HOLD */
+    @Test
+    fun 午后稳定时段正常出信号() {
+        val n = 157 // lastPos = 156 → AFTERNOON
+        val perMin = List(n - 5) { 100L } + List(5) { 300L }
+        val pts = series(List(n) { 10.0 + it * 0.001 }, avgPct = -1.0, perMin = perMin)
+        val f = IntradaySignalEvaluator.features(pts, flatIndex, 10.0)
+        assertEquals(MarketPhase.AFTERNOON, f.phase)
+
+        val s = IntradaySignalEvaluator.evaluate(pts, flatIndex, 10.0, false)
+        assertEquals(IntradayAction.BUY, s.action)
+        assertTrue(s.score >= 2.5)
+
+        val h = IntradaySignalEvaluator.evaluate(pts, flatIndex, 10.0, true)
+        assertEquals(IntradayAction.HOLD, h.action)
+    }
+
+    /** 14. 顶部反转回归（评审 §1.2①/§1.4⑫）：冲高后回落，VWAP 仍读多头、score 仍 ≥2.5，不得出 BUY */
+    @Test
+    fun 冲高回落不得出买入() {
+        // 回落分支：快速拉到 10.30 后跌回 10.14（距高点 −1.55%），mom15 仍为正 → 靠 fromHigh 拦截
+        val pullback = List(45) {
+            10.0 + when (it) {
+                in 0..39 -> 0.0
+                40 -> 0.25
+                41 -> 0.30
+                42 -> 0.24
+                43 -> 0.20
+                else -> 0.14
+            }
+        }
+        val s1 = IntradaySignalEvaluator.evaluate(series(pullback), flatIndex, 10.0, false)
+        assertTrue(s1.score >= 2.5) // 盲区复现：score 仍够 BUY 阈值
+        assertEquals(IntradayAction.WATCH, s1.action)
+        assertTrue(s1.reasons.any { it.contains("回落") })
+
+        // 横盘分支：前 29 分钟 10.0，之后 16 分钟拉到 10.14 并横住（mom30=1.4% 不触发追高），mom15 = 0 → 靠短动量拦截
+        val flat15 = List(45) { 10.0 + if (it >= 29) 0.14 else 0.0 }
+        val s2 = IntradaySignalEvaluator.evaluate(series(flat15), flatIndex, 10.0, false)
+        assertTrue(s2.score >= 2.5)
+        assertEquals(IntradayAction.WATCH, s2.action)
+        assertTrue(s2.reasons.any { it.contains("转弱") })
+    }
+
+    /** 15. 墙钟兜底（评审 §1.3⑤/§2.2b）：分钟接口少行时 15:00 后不发陈旧信号；周末不按数据判时段 */
+    @Test
+    fun 墙钟收盘与周末兜底() {
+        // 156 点（缺一行，位置本应 AFTERNOON）+ 墙钟 15:30 → CLOSED
+        val pts = series(List(157) { 10.0 + it * 0.001 })
+        val friday1500 = atTime(2026, 7, 7, 15, 30) // 2026-08-07 周五 15:30
+        assertEquals(MarketPhase.CLOSED, IntradaySignalEvaluator.wallClockPhase(friday1500))
+        assertEquals(MarketPhase.AFTERNOON, IntradaySignalEvaluator.phaseOf(pts))
+        val sWeek = IntradaySignalEvaluator.evaluate(pts, flatIndex, 10.0, false, friday1500)
+        assertEquals(IntradayAction.NO_TRADE, sWeek.action)
+        assertTrue(sWeek.reasons.any { it.contains("已收盘") })
+
+        // 周六上午：墙钟直接 CLOSED，数据判段被覆盖
+        val saturday1100 = atTime(2026, 7, 8, 11, 0) // 2026-08-08 周六 11:00
+        assertEquals(MarketPhase.CLOSED, IntradaySignalEvaluator.wallClockPhase(saturday1100))
+        val sSat = IntradaySignalEvaluator.evaluate(pts, flatIndex, 10.0, false, saturday1100)
+        assertEquals(IntradayAction.NO_TRADE, sSat.action)
+        assertTrue(sSat.reasons.any { it.contains("已收盘") })
+
+        // 交易时段内墙钟不干扰数据判段（周五 10:00 → 仍按位置 AFTERNOON）
+        val friday1000 = atTime(2026, 7, 7, 10, 0)
+        assertEquals(null, IntradaySignalEvaluator.wallClockPhase(friday1000))
+        assertEquals(
+            MarketPhase.AFTERNOON,
+            IntradaySignalEvaluator.features(pts, flatIndex, 10.0, friday1000).phase
+        )
+    }
+
+    /** 构造指定本地时刻的 epoch 毫秒（与 wallClockPhase 同用默认时区，保证往返一致） */
+    private fun atTime(year: Int, month: Int, day: Int, hour: Int, minute: Int): Long =
+        Calendar.getInstance().apply {
+            clear()
+            set(year, month, day, hour, minute, 0)
+        }.timeInMillis
 }

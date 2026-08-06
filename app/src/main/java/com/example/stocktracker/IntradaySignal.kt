@@ -1,5 +1,6 @@
 package com.example.stocktracker
 
+import java.util.Calendar
 import java.util.Locale
 
 /** 盘中择时信号等级 */
@@ -63,6 +64,13 @@ object IntradaySignalEvaluator {
     const val CHASE_MOM30_PCT = 1.5
     const val CHASE_FROM_HIGH_PCT = -0.5
 
+    // 顶部反转加固（评审 §1.2①）：BUY 需短动量向上；距日内高点明显回落禁 BUY
+    const val BUY_MOM15_MIN = 0.0
+    const val BUY_FROM_HIGH_MAX = -1.0
+
+    // 墙钟辅助时段（评审 §1.3⑤ / §2.2b）：data 缺行时兜底判"已收盘"，避免陈旧信号
+    const val CLOSED_WALL_MINUTES = 15 * 60 // ≥15:00 视为收盘
+
     const val W_MOM15 = 1.0
     const val W_MOM30 = 0.8
     const val W_RS = 1.5
@@ -85,6 +93,19 @@ object IntradaySignalEvaluator {
             lastPos < LAST_POS -> MarketPhase.AFTERNOON
             else -> MarketPhase.CLOSED
         }
+    }
+
+    /**
+     * 墙钟辅助时段（评审 §1.3⑤ / §2.2b）：交易时段内返回 null（以数据位置为准），
+     * 仅当"已收盘/周末"时返回 CLOSED，兜底分钟接口少返回一行导致 15:00 后仍判 AFTERNOON 的场景。
+     */
+    fun wallClockPhase(nowMillis: Long): MarketPhase? {
+        val cal = Calendar.getInstance().apply { timeInMillis = nowMillis }
+        val day = cal.get(Calendar.DAY_OF_WEEK)
+        if (day == Calendar.SATURDAY || day == Calendar.SUNDAY) return MarketPhase.CLOSED
+        val min = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
+        if (min >= CLOSED_WALL_MINUTES) return MarketPhase.CLOSED
+        return null
     }
 
     private fun pctChange(a: Double, b: Double): Double? =
@@ -112,7 +133,8 @@ object IntradaySignalEvaluator {
     fun features(
         points: List<MinutePoint>,
         indexPoints: List<MinutePoint>?,
-        prevClose: Double?
+        prevClose: Double?,
+        nowMillis: Long? = null
     ): IntradayFeatures {
         val lastPos = points.size - 1
         val last = points[lastPos]
@@ -126,7 +148,8 @@ object IntradaySignalEvaluator {
         val dayHigh = points.maxOf { it.price }
         val fromHigh = if (dayHigh > 0) pctChange(last.price, dayHigh) ?: 0.0 else 0.0
         return IntradayFeatures(
-            phase = phaseOf(points),
+            // nowMillis 传 null（纯函数/测试）时按数据位置；实机传入墙钟兜底收盘/周末
+            phase = if (nowMillis != null) (wallClockPhase(nowMillis) ?: phaseOf(points)) else phaseOf(points),
             mom15 = mom15,
             mom30 = mom30,
             indexMom30 = indexMom30,
@@ -143,10 +166,11 @@ object IntradaySignalEvaluator {
         points: List<MinutePoint>,
         indexPoints: List<MinutePoint>?,
         prevClose: Double?,
-        hasPosition: Boolean
+        hasPosition: Boolean,
+        nowMillis: Long? = null
     ): IntradaySignal {
         if (points.isEmpty()) return noTrade("数据积累中")
-        val f = features(points, indexPoints, prevClose)
+        val f = features(points, indexPoints, prevClose, nowMillis)
         when (f.phase) {
             MarketPhase.EARLY -> return noTrade("数据积累中")
             MarketPhase.LUNCH -> return noTrade("午间休市")
@@ -181,7 +205,8 @@ object IntradaySignalEvaluator {
         }
 
         // 追高拦截：接近日内高点 + (当日累计涨幅大 或 30分钟涨速快) → 降级
-        val chase = (f.dayGain != null && f.dayGain > CHASE_DAY_GAIN_PCT || (f.mom30 ?: 0.0) > CHASE_MOM30_PCT) &&
+        // 同期评审 §1.3⑩：边界改为 >=，防止恰为 2.0%/1.5% 时抖动漏拦
+        val chase = (f.dayGain != null && f.dayGain >= CHASE_DAY_GAIN_PCT || (f.mom30 ?: 0.0) >= CHASE_MOM30_PCT) &&
             f.fromHigh > CHASE_FROM_HIGH_PCT
 
         var action: IntradayAction
@@ -199,6 +224,17 @@ object IntradaySignalEvaluator {
         if (action == IntradayAction.BUY && chase) {
             action = IntradayAction.WATCH
             reasons += "已接近日内高点（距最高${fmt(f.fromHigh)}），追高风险大"
+        }
+        // 顶部反转确认（评审 §1.2①）：VWAP 滞后，冲高回落后 aboveAvg 仍会读多头，需额外确认
+        if (action == IntradayAction.BUY) {
+            val mom15 = f.mom15 ?: 0.0
+            if (mom15 <= BUY_MOM15_MIN) {
+                action = IntradayAction.WATCH
+                reasons += "15分钟动量${fmt(mom15)}转弱，存在顶部反转风险，暂缓买入"
+            } else if (f.fromHigh <= BUY_FROM_HIGH_MAX) {
+                action = IntradayAction.WATCH
+                reasons += "已从日内高点回落${fmt(f.fromHigh)}，不追回落"
+            }
         }
 
         return when (action) {

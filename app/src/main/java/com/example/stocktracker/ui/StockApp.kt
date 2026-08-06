@@ -631,10 +631,6 @@ private fun PredictionCard(
     }
 }
 
-@Composable
-private fun signedPct(v: Double): String =
-    String.format(if (v >= 0) "+%.1f%%" else "%.1f%%", v)
-
 // ---------------- 账户总盈亏条（点击一键刷新全部行情） ----------------
 @Composable
 private fun AccountPnlBar(s: StockState, onRefreshAll: () -> Unit) {

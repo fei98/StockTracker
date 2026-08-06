@@ -10,6 +10,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 class StockViewModel(
@@ -45,6 +47,9 @@ class StockViewModel(
     private var indexCacheAt = 0L
     private var indexCachePoints: List<MinutePoint>? = null
 
+    // 指数拉取互斥锁（评审 §1.3⑦）：并发入口只发起一次真实请求
+    private val indexMutex = Mutex()
+
     /** 加载当前选中股票的今日分时并计算盘中信号（切股后首次点分时重新拉取；force=true 强制刷新） */
     fun loadIntraday(force: Boolean = false) {
         val acc = _state.value.selected ?: return
@@ -53,29 +58,36 @@ class StockViewModel(
         if (!force && intradayStockKey == stock.marketCode) return // 已缓存该股
         _intradayLoading.value = true
         viewModelScope.launch {
-            val index = withContext(Dispatchers.IO) { fetchIndexPoints(stock) }
+            // 指数与个股并发拉取（评审 §1.3⑧：原串行两次请求，信号滞后）
+            val index = async(Dispatchers.IO) { fetchIndexPoints(stock) }
             val data = withContext(Dispatchers.IO) { api.fetchIntraday(stock) }
             _intraday.value = data
             intradayStockKey = if (data != null) stock.marketCode else null
             _signal.value = data?.let {
-                IntradaySignalEvaluator.evaluate(it, index, acc.prevClose, acc.totalQty > 0)
+                IntradaySignalEvaluator.evaluate(
+                    it, index.await(), acc.prevClose, acc.totalQty > 0, System.currentTimeMillis()
+                )
             }
             _intradayLoading.value = false
         }
     }
 
-    /** 指数分钟线（60 秒缓存，命中缓存不重拉） */
+    /** 指数分钟线（60 秒缓存，命中缓存不重拉；互斥保证并发只发一次请求） */
     private suspend fun fetchIndexPoints(stock: Stock): List<MinutePoint>? {
         val code = TencentMarketDataApi.SECTOR_MAP[stock.marketCode]?.indexCode
             ?: TencentMarketDataApi.FALLBACK_CONFIG.indexCode
         val now = System.currentTimeMillis()
         if (indexCacheCode == code && now - indexCacheAt < 60_000) return indexCachePoints
-        val indexStock = Stock(code = code.substring(2), name = "", market = code.substring(0, 2))
-        val pts = api.fetchIntraday(indexStock)
-        indexCacheCode = code
-        indexCacheAt = now
-        indexCachePoints = pts
-        return pts
+        return indexMutex.withLock {
+            val now2 = System.currentTimeMillis()
+            if (indexCacheCode == code && now2 - indexCacheAt < 60_000) return@withLock indexCachePoints
+            val indexStock = Stock(code = code.substring(2), name = "", market = code.substring(0, 2))
+            val pts = api.fetchIntraday(indexStock)
+            indexCacheCode = code
+            indexCacheAt = now2
+            indexCachePoints = pts
+            pts
+        }
     }
 
     private var nextId = 1L

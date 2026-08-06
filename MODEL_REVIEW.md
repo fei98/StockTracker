@@ -1,20 +1,80 @@
 # 竞价预测模型评审报告
 
 > 按 `MODEL_CHANGES.md` 各轮改动同步更新，与 `MODEL_CHANGES.md` 配合维护。
-> 后续评审直接在末尾追加 `## vN 评审` 章节。
+> **约定：最新评审放最前面（`## v6 评审` 为最新），旧评审依次后移。**
 
 ---
 
-## 当前状态（v5）
+## 当前状态（v6）
 
-| 维度 | v3 | v4 | v5 | 说明 |
-|------|-----|-----|-----|------|
-| 因子质量 | 8 | 8.5 | 8.5 | +加权广度、+交互项 |
-| 评分公式 | 7 | 8 | 8 | +交互项、+多目标投票 |
-| 标定框架 | 9 | 9 | 9 | +合成权重搜索、+F1 阈值 |
-| 工程纪律 | 9 | 9 | 9 | OOS 严格，缓存到位 |
-| 性能 | 7 | 6.5 | 7.5 | +votedSeries 缓存，消除 O(n³) 瓶颈 |
-| 可测试性 | 9 | 9 | 9 | 147 用例 |
+| 维度 | v3 | v4 | v5 | v6 | 说明 |
+|------|-----|-----|-----|-----|------|
+| 因子质量 | 8 | 8.5 | 8.5 | 8.5 | 竞价引擎未变；盘中信号为独立规则模型 |
+| 评分公式 | 7 | 8 | 8 | 8 | 竞价引擎未变 |
+| 标定框架 | 9 | 9 | 9 | 9.5 | +同日去重，历史数据卫生提升 |
+| 工程纪律 | 9 | 9 | 9 | 9.5 | +去重回归、并发 token 防护 |
+| 性能 | 7 | 6.5 | 7.5 | 7.5 | 竞价引擎未变 |
+| 可测试性 | 9 | 9 | 9 | 9.5 | 189 用例（含 IntradaySignalTest 12 例） |
+
+---
+
+## v6 评审（最新，对应 MODEL_CHANGES.md v6）
+
+> 本次为**结合代码复核 `MODEL_CHANGES.md`** 的全面评审：逐项核验 v4/v5/v6 声明与代码一致性，并新发现问题。
+> 验证基准：全量 189 用例通过（`gradlew :app:testDebugUnitTest`）。
+> 涉及代码：`Calibration.kt`、`AuctionPredictor.kt`、`PredictionEngine.kt`、`PredictionModel.kt`、`SnapshotStore.kt`、`IntradaySignal.kt`、`PredictionViewModel.kt`、`StockViewModel.kt`、`ui/StockApp.kt`。
+
+### 1. 声明与代码一致性核验（v4/v5/v6 全部通过，无虚报）
+
+| MODEL_CHANGES.md 声明 | 代码证据 | 结果 |
+|------------------------|----------|------|
+| 8.1 多目标投票 0.5/0.25/0.25 | `Calibration.kt:46-50 VOTE_WEIGHTS`；`walkForwardVotedSeries`（Calibration.kt:244-268）逐折三目标前缀权重评分加权合成，实际结果以主目标判定；`PredictionEngine.kt:145` 加权投票 | ✅ |
+| 8.2 加权广度 | `AuctionPredictor.kt:52-63`，`BREADTH_GAP_CAP=3.0`，公式与文档一致 | ✅ |
+| 8.3 合成权重搜索 | `PredictionModel.kt:67 sectorW=1-targetW-indexW`；`scoreFor` 延迟重算（Calibration.kt:98-105）；约束 targetW∈[0.2,0.8]、indexW∈[0.05,0.45]、sectorW≥0.1（Calibration.kt:201-209） | ✅ |
+| 8.4 交互项 | `AuctionPredictor.kt:162-163`，`interactionScale∈[0,1.5]`（Calibration.kt:200） | ✅ |
+| 8.7 F1 阈值 | `Calibration.kt:277-302 curveThreshold(series)` argmax F1，调用方同步（PredictionEngine.kt:149） | ✅ |
+| v5 votedSeries 缓存 | `PredictionEngine.kt:18-22,217-226`，`records.hashCode()` 签名，`runPrediction` 改用缓存序列 | ✅ |
+| v5 strengthHistory 目标特定权重 | `PredictionEngine.kt:127-130` `strengthHistoryByTarget[t]` 用 `weightsByTarget[t]` | ✅ |
+| v6 盘中信号 / 去重 / UI | 见 `INTRADAY_SIGNAL_REVIEW.md §1` 代码评审（结论：可合入） | ✅ |
+
+### 2. 新发现问题（本次复核发现，按优先级）
+
+**① 竞价 worker 迟到 → 盘中价污染历史记录（高，建议合入前修复）**
+- `isObservationPhase` 只拦截 9:20 前（PredictionEngine.kt:37-42），`runPrediction` 全天任意时刻均可执行。9:25 的 `PredictWorker` 若被 Doze/国产 ROM 延迟到盘中（如 11:00），会用**盘中实时价当竞价因子、把当前价当 open 落库**，并写入当日 `DailySnapshot`（PredictionEngine.kt:174-177）→ 一条错误的"竞价记录"永久进入 walk-forward 标定与放量基线。
+- v6 下线 UI 手动预测后，`PredictWorker` 是**唯一记录源**，此漏洞影响放大。
+- 建议：`runPrediction`（或 `PredictWorker`）增加交易时段窗口校验（仅 9:20–9:35 可执行），迟到则跳过当天、不落记录。
+
+**② 结果回填迟到 → outcome 误标（中）**
+- `recordOutcome30m`（PredictionEngine.kt:182-188）若 10:00 任务延迟，会用更晚的实时价判定"开盘 30 分钟方向"（如 11:00 跑 → 实际是 2 小时方向）；`recordOutcomeClose`（190-200）同理。误标 outcome 会污染三目标标定。
+- 建议：回填前校验时间窗口（30 分钟回填取 10:00–10:15 区间价；收盘回填取 ≥15:00 且临近收盘的价）。
+
+**③ F1 阈值曲线的 predicted 标签不随候选阈值重算（中低）**
+- `curveThreshold`（Calibration.kt:277-302）对每个候选 t 直接使用 `series[i].predicted`，而该值在 `walkForwardVotedSeries` 中固定按 `REF_THRESHOLD=2.0` 分类（Calibration.kt:263）。当候选 t<2.0 时，|score|∈[t,2.0) 的记录 predicted=FLAT 却计入 precision 分母 → precision 被系统性低估 → 阈值选择偏向 ≥2.0。
+- 引擎运行时 `classify(score, threshold)` 用的是选出的阈值，若选出 t<2.0，标定与实际分类不一致。文档"对每个候选 t 的方向预测"与实现不符。
+- 建议：对每个候选 t 现场 `classify(score, t)` 重算 predicted；或候选域限定 t≥2.0。
+
+**④ 评分名义范围"±13"偏保守（低）**
+- 极端同向（volAmp=+0.5、交互、广度、外围）理论可达 ±19；`capDecision` 返回 null（未触发）时极端分不封顶。影响仅封顶触发与信心邻域稀疏性。
+
+**⑤ 首折单样本跑坐标下降（低/性能）**
+- `walkForwardSeries`/`walkForwardVotedSeries` 首折 prefix 仅 1 条，`refine` 仍执行粗搜+细搜，纯噪音。建议 prefix 不足 `MIN_CAL_SAMPLES` 时直接 DEFAULT。
+
+**⑥ 文档一致性（低）**
+- `MODEL_CHANGES.md` v5 段"全量 147 用例"与配套改动段"146 用例"不一致（当前全量 189）；建议统一为实测值。
+- `MODEL_REVIEW.md` §6 迭代记录原缺 v6 行（本次已补）。
+
+### 3. v6 已评审问题的复核（结论不变，详见 `INTRADAY_SIGNAL_REVIEW.md §1`）
+
+- 代码正确性高、可合入；去重修复正确且必要。
+- 模型盲区：**顶部反转盲区**（VWAP 滞后，见 INTRADAY §1.2①）建议加固（mom15>0 确认 + 回落禁 BUY）。
+- 测试缺口：AFTERNOON（位置≥151）分支未测（INTRADAY §1.4⑪）；无顶部反转用例（⑫）。
+- 其他：非 A 股基准错配、`signedPct` 死代码、指数接口真机待验证。
+
+### 4. 结论
+
+- `MODEL_CHANGES.md` 声明的 v4/v5/v6 改动与代码**一致，无虚报**。
+- 最高优先级待修：**① 竞价 worker 迟到污染记录**（建议合入 v7 前修复）；**② 回填窗口校验**次之。
+- ③④⑤⑥ 顺带处理；⑦ 竞价详情/命中率展示下线导致"可靠性可视性退化"（产品取舍，提醒）。
 
 ---
 
@@ -183,7 +243,7 @@ SharedPreferences (JSON)
 | `MarketDataTest.kt` | 行情字段解析 |
 | `SectorLearnerTest.kt` | 皮尔逊相关、自动推荐、关键词匹配 |
 
-> 全量 147 用例，0 失败。
+> 全量 189 用例，0 失败（含 IntradaySignalTest 12 例、同日去重回归 1 例）。
 
 ---
 
@@ -196,6 +256,7 @@ SharedPreferences (JSON)
 | v3 | 连阳比例缩放、prevDayPct评分、封顶自适应、坐标下降先粗后细、分段衰减加权、wfCache | — |
 | v4 | 多目标投票、加权广度、合成权重搜索、交互项、F1阈值 | 见 v4 评审 |
 | v5 | votedSeries缓存、strengthHistory目标特定权重 | 见 v5 评审 |
+| v6 | 盘中实时信号重构、同日去重修复、UI 下线竞价详情 | 见 v6 评审（顶部） |
 
 ---
 
@@ -203,6 +264,7 @@ SharedPreferences (JSON)
 
 | 优先级 | 事项 | 状态 |
 |--------|------|------|
+| 高 | 竞价 worker/结果回填 增加交易时段窗口校验（v6 评审 ① ②） | ⏳ 待修 |
 | 低 | 8.5 硬编码常数参数化 (VOL_Z_DIV / STREAK_DIV 等) | ⏳ 待定 |
 | 低 | 8.6 存储层升级 SharedPreferences → Room | ⏳ 待定 |
 
