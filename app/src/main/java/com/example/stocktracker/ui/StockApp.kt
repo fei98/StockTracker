@@ -134,7 +134,6 @@ fun StockApp() {
     var showClearDialog by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
     var showTradeDialog by remember { mutableStateOf(false) }
-    var showHistoryDialog by remember { mutableStateOf(false) }
     var showPriceDialog by remember { mutableStateOf(false) }
     var showPredDetail by remember { mutableStateOf(false) }
     var showSectorPicker by remember { mutableStateOf(false) }
@@ -251,7 +250,7 @@ fun StockApp() {
                         }
                     }
                     item { HoldingsCard(acc) }
-                    item { HistoryPreviewCard(acc.trades) { showHistoryDialog = true } }
+                    item { HistoryPreviewCard(acc.trades) }
                     item {
                         Row(
                             Modifier.fillMaxWidth(),
@@ -279,9 +278,6 @@ fun StockApp() {
             onSell = vm::sell,
             onDismiss = { showTradeDialog = false }
         )
-    }
-    if (showHistoryDialog && acc != null) {
-        HistoryDialog(acc.trades) { showHistoryDialog = false }
     }
     if (showPriceDialog) {
         PriceDialog(
@@ -995,47 +991,27 @@ private fun LotRow(lp: com.example.stocktracker.LotPnl, currentPrice: Double?, f
     }
 }
 
-// ---------------- 交易记录预览卡片（最多 3 条，更多进弹窗） ----------------
+// ---------------- 交易记录卡片（默认 3 条，点击"查看全部"原地展开） ----------------
 @Composable
-private fun HistoryPreviewCard(trades: List<com.example.stocktracker.TradeRecord>, onShowAll: () -> Unit) {
+private fun HistoryPreviewCard(trades: List<com.example.stocktracker.TradeRecord>) {
+    var expanded by remember { mutableStateOf(false) }
     SectionCard(title = "交易记录") {
         if (trades.isEmpty()) {
             EmptyText("暂无交易")
         } else {
-            trades.reversed().take(3).forEach { t ->
+            val shown = if (expanded) trades.reversed() else trades.reversed().take(3)
+            shown.forEach { t ->
                 TradeRow(t)
                 HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
             }
             if (trades.size > 3) {
                 TextButton(
-                    onClick = onShowAll,
+                    onClick = { expanded = !expanded },
                     modifier = Modifier.fillMaxWidth()
-                ) { Text("查看全部 ${trades.size} 条") }
+                ) { Text(if (expanded) "收起" else "查看全部 ${trades.size} 条") }
             }
         }
     }
-}
-
-// ---------------- 交易记录弹窗（全部） ----------------
-@Composable
-private fun HistoryDialog(trades: List<com.example.stocktracker.TradeRecord>, onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("交易记录") },
-        text = {
-            if (trades.isEmpty()) {
-                EmptyText("暂无交易")
-            } else {
-                LazyColumn(Modifier.heightIn(max = 360.dp)) {
-                    items(trades.reversed()) { t ->
-                        TradeRow(t)
-                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
-                    }
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
-    )
 }
 
 @Composable
