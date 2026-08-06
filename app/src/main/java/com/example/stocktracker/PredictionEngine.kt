@@ -40,6 +40,33 @@ class PredictionEngine(
             val m = cal.get(Calendar.MINUTE)
             return h < 9 || (h == 9 && m < 20)
         }
+
+        /** 竞价预测执行窗口（Asia/Shanghai）：9:20–9:35。9:25 正常调度 + 延迟容差；窗口外不落记录 */
+        fun isPredictionWindow(nowMillis: Long): Boolean {
+            val cal = Calendar.getInstance(IntradaySignalEvaluator.CN_TZ).apply { timeInMillis = nowMillis }
+            val min = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
+            return min in PREDICTION_START_MIN until PREDICTION_END_MIN
+        }
+
+        /** 结果回填窗口：30 分钟方向取 10:00–10:15 区间价；收盘取 15:00–16:00 收盘价 */
+        fun isOutcome30mWindow(nowMillis: Long): Boolean {
+            val cal = Calendar.getInstance(IntradaySignalEvaluator.CN_TZ).apply { timeInMillis = nowMillis }
+            val min = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
+            return min in OUT30_START_MIN until OUT30_END_MIN
+        }
+
+        fun isOutcomeCloseWindow(nowMillis: Long): Boolean {
+            val cal = Calendar.getInstance(IntradaySignalEvaluator.CN_TZ).apply { timeInMillis = nowMillis }
+            val min = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
+            return min in CLOSE_START_MIN until CLOSE_END_MIN
+        }
+
+        const val PREDICTION_START_MIN = 9 * 60 + 20
+        const val PREDICTION_END_MIN = 9 * 60 + 35
+        const val OUT30_START_MIN = 10 * 60
+        const val OUT30_END_MIN = 10 * 60 + 15
+        const val CLOSE_START_MIN = 15 * 60
+        const val CLOSE_END_MIN = 16 * 60
     }
 
     /** 观察区信息：9:15–9:20 量价变化形态（庄家意图参考，不参与评分） */
@@ -57,6 +84,8 @@ class PredictionEngine(
         nowMillis: Long = System.currentTimeMillis()
     ): PredictionResult? {
         if (isObservationPhase(nowMillis)) return null
+        // v11（v10 §4b 纵深防御）：引擎层窗口守卫，防未来恢复手动入口时盘中价污染历史记录
+        if (!isPredictionWindow(nowMillis)) return null
         if (!isPredictable(stock)) return null
         val key = stock.marketCode
         val snap = market.fetchSnapshot(stock)
@@ -178,8 +207,9 @@ class PredictionEngine(
         return result
     }
 
-    /** 10:00 回填：开盘后 30 分钟方向 */
-    suspend fun recordOutcome30m(stock: Stock, date: String) {
+    /** 10:00 回填：开盘后 30 分钟方向（仅 10:00–10:15 窗口执行，防迟到用盘中价误标） */
+    suspend fun recordOutcome30m(stock: Stock, date: String, nowMillis: Long = System.currentTimeMillis()) {
+        if (!isOutcome30mWindow(nowMillis)) return
         val key = stock.marketCode
         val rec = store.loadRecords(key).find { it.date == date } ?: return
         val open = rec.open ?: return
@@ -187,8 +217,9 @@ class PredictionEngine(
         store.updateOutcomes(key, date, outcomeOf(price, open), null, null)
     }
 
-    /** 15:05 回填：收盘 vs 开盘、全天 vs 昨收，并回填当日快照的收盘数据 */
-    suspend fun recordOutcomeClose(stock: Stock, date: String) {
+    /** 15:05 回填：收盘 vs 开盘、全天 vs 昨收，并回填当日快照的收盘数据（仅 15:00–16:00 窗口执行） */
+    suspend fun recordOutcomeClose(stock: Stock, date: String, nowMillis: Long = System.currentTimeMillis()) {
+        if (!isOutcomeCloseWindow(nowMillis)) return
         val key = stock.marketCode
         val rec = store.loadRecords(key).find { it.date == date } ?: return
         val quote = market.fetchTargetQuote(stock) ?: return

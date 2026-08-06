@@ -1,6 +1,7 @@
 package com.example.stocktracker
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -49,6 +50,15 @@ class MarketDataTest {
         val qf = parseQuoteFields("v_usIXIC=\"" + fields.joinToString("~") + "\";")!!
         assertEquals(2.59, qf.pct!!, 0.0001)
         assertEquals("IXIC", qf.code)
+    }
+
+    @Test
+    fun 行情时间戳_日期判定容忍分隔符() {
+        assertTrue(quoteTimeIsOnDate("20260807102532", "20260807"))            // YYYYMMDDHHMMSS
+        assertTrue(quoteTimeIsOnDate("2026-08-07 10:25:32", "20260807"))       // 带分隔符
+        assertFalse(quoteTimeIsOnDate("20260806102532", "20260807"))           // 上一交易日
+        assertFalse(quoteTimeIsOnDate("", "20260807"))                          // 空时间戳
+        assertFalse(quoteTimeIsOnDate("102532", "20260807"))                    // 不足日期前缀
     }
 }
 

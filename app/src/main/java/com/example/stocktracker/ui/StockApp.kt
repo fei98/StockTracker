@@ -102,6 +102,7 @@ import com.example.stocktracker.OverviewTab
 import com.example.stocktracker.PredictionEngine
 import com.example.stocktracker.PredictionOutcome
 import com.example.stocktracker.PredictionViewModel
+import com.example.stocktracker.PrefsIntradaySignalStore
 import com.example.stocktracker.PrefsSnapshotStore
 import com.example.stocktracker.QuoteResult
 import com.example.stocktracker.PrefsStorage
@@ -154,7 +155,7 @@ fun StockApp() {
     val state by vm.state.collectAsStateWithLifecycle()
     val acc = state.selected
     val predVm: PredictionViewModel = viewModel {
-        PredictionViewModel()
+        PredictionViewModel(signalStore = PrefsIntradaySignalStore(context))
     }
     val predUi by predVm.ui.collectAsStateWithLifecycle()
     val predStock = acc?.stock
@@ -162,11 +163,11 @@ fun StockApp() {
     // 切换选中股票时刷新盘中信号；停留期间每 30 秒自动刷新
     LaunchedEffect(predStock?.marketCode) {
         val a = state.selected ?: return@LaunchedEffect
-        predVm.refresh(a.stock, a.prevClose, a.totalQty > 0)
+        predVm.refresh(a.stock, a.prevClose, a.totalQty > 0, a.sellableQty > 0)
         while (true) {
             delay(30_000)
             val cur = state.selected ?: break
-            predVm.refresh(cur.stock, cur.prevClose, cur.totalQty > 0)
+            predVm.refresh(cur.stock, cur.prevClose, cur.totalQty > 0, cur.sellableQty > 0)
         }
     }
     val snackbar = remember { SnackbarHostState() }
@@ -298,7 +299,9 @@ fun StockApp() {
                         if (predStock != null && acc != null) {
                             PredictionCard(
                                 ui = predUi,
-                                onRefresh = { predVm.refresh(acc.stock, acc.prevClose, acc.totalQty > 0) }
+                                onRefresh = {
+                                    predVm.refresh(acc.stock, acc.prevClose, acc.totalQty > 0, acc.sellableQty > 0)
+                                }
                             )
                         }
                     }
@@ -1355,6 +1358,18 @@ private fun PredictionPanel(predUi: PredictionViewModel.UiState, onRefresh: () -
                                 shown.joinToString(" · "),
                                 fontSize = 10.sp,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+                                modifier = Modifier.padding(start = 0.dp)
+                            )
+                        }
+                    }
+                    val stats = row.stats
+                    if (stats != null) {
+                        val rateText = stats.hitRatePct?.let { "命中率 $it" } ?: "样本积累中"
+                        Row(Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
+                            Text(
+                                "历史验证：$rateText（${stats.directional} 样本） · 扣费期望 ${stats.avgNetMoveText ?: "—"}",
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
                                 modifier = Modifier.padding(start = 0.dp)
                             )
                         }

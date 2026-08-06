@@ -10,8 +10,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 class StockViewModel(
@@ -42,14 +40,6 @@ class StockViewModel(
 
     private var intradayStockKey: String? = null
 
-    // 指数分钟线缓存（60 秒 TTL，评审⑧；个股分钟照旧 10 秒刷新）
-    private var indexCacheCode: String? = null
-    private var indexCacheAt = 0L
-    private var indexCachePoints: List<MinutePoint>? = null
-
-    // 指数拉取互斥锁（评审 §1.3⑦）：并发入口只发起一次真实请求
-    private val indexMutex = Mutex()
-
     /** 加载当前选中股票的今日分时并计算盘中信号（切股后首次点分时重新拉取；force=true 强制刷新） */
     fun loadIntraday(force: Boolean = false) {
         val acc = _state.value.selected ?: return
@@ -65,30 +55,18 @@ class StockViewModel(
             intradayStockKey = if (data != null) stock.marketCode else null
             _signal.value = data?.let {
                 IntradaySignalEvaluator.evaluate(
-                    it, index.await(), acc.prevClose, acc.totalQty > 0, System.currentTimeMillis()
+                    it, index.await(), acc.prevClose, acc.totalQty > 0, System.currentTimeMillis(),
+                    priceLimitPct = priceLimitPct(acc.stock),
+                    canSell = acc.sellableQty > 0
                 )
             }
             _intradayLoading.value = false
         }
     }
 
-    /** 指数分钟线（60 秒缓存，命中缓存不重拉；互斥保证并发只发一次请求） */
-    private suspend fun fetchIndexPoints(stock: Stock): List<MinutePoint>? {
-        val code = TencentMarketDataApi.SECTOR_MAP[stock.marketCode]?.indexCode
-            ?: TencentMarketDataApi.FALLBACK_CONFIG.indexCode
-        val now = System.currentTimeMillis()
-        if (indexCacheCode == code && now - indexCacheAt < 60_000) return indexCachePoints
-        return indexMutex.withLock {
-            val now2 = System.currentTimeMillis()
-            if (indexCacheCode == code && now2 - indexCacheAt < 60_000) return@withLock indexCachePoints
-            val indexStock = Stock(code = code.substring(2), name = "", market = code.substring(0, 2))
-            val pts = api.fetchIntraday(indexStock)
-            indexCacheCode = code
-            indexCacheAt = now2
-            indexCachePoints = pts
-            pts
-        }
-    }
+    /** 指数分钟线：进程级共享缓存（60 秒 TTL + 互斥去重），个股分钟照旧 10 秒刷新 */
+    private suspend fun fetchIndexPoints(stock: Stock): List<MinutePoint>? =
+        IndexMinuteCache.fetch(api, stock)
 
     private var nextId = 1L
     private var searchSeq = 0

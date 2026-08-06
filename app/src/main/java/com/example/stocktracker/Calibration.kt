@@ -272,6 +272,9 @@ object Calibrator {
     /**
      * F1 最大化阈值：对每个候选 t，|score| ≥ t 的方向预测，
      * precision = 命中/入选数，recall = 命中/全部方向样本数，F1 = 2PR/(P+R)；取 F1 最大者。
+     * v10 修复：predicted 按候选阈值现场重算（classify(score, t)），
+     * 消除 REF_THRESHOLD=2.0 固定标签在 t<2.0 时把 |score|∈[t,2) 样本计入 precision 分母、
+     * 导致精度被系统性低估且标定与运行时分类不一致的问题（MODEL_REVIEW v6 ③）。
      * 比纯命中率对样本不均衡更稳健。
      */
     fun curveThreshold(series: List<WFPoint>): Double? {
@@ -287,7 +290,7 @@ object Calibrator {
             idxs.forEach { i ->
                 val w = decayWeight(series.size - 1 - i)
                 totW += w
-                if (series[i].predicted == series[i].actual) hitW += w
+                if (AuctionPredictor.classify(series[i].score, t) == series[i].actual) hitW += w
             }
             val precision = if (totW == 0.0) 0.0 else hitW / totW
             val recallW = series.indices.sumOf { i ->

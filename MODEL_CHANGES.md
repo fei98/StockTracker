@@ -3,6 +3,154 @@
 > 本文件记录按评审报告建议所做的模型改动，与评审报告（MODEL_REVIEW.md / INTRADAY_SIGNAL_REVIEW.md）分开维护。
 > **约定：最新改动放在最前面，旧改动依次下移。每一轮均对应代码与测试同步更新。**
 
+## v12 改动（2026-08-07：调休周末采集链判据修正）
+
+> 依据 `INTRADAY_SIGNAL_REVIEW.md` v11 §4a：`continueOnWeekend` 以"是否采到方向信号"为判据，在调休周末交易日的 WATCH/HOLD slot 或午休时段会误判为非交易日，导致 10 分钟采集链中断、当日剩余时段不再采集。
+
+### 1. 交易日判定改用行情时间戳日期 ✅
+
+**代码**：`PredictionWorkers.kt`、`MarketData.kt`（新增纯函数 `quoteTimeIsOnDate`）
+
+- `IntradaySignalWorker` 在运行起始判定"今日是否真实交易日"：任意持仓的行情时间戳日期（腾讯 `qt.gtimg.cn` 字段 30，格式 `YYYYMMDDHHMMSS`）== 今天（Asia/Shanghai）→ `isTradingDay = true`。
+- 普通周末：行情时间戳是上一交易日 → false → 排班顺延下周一（一次空跑）；调休周末交易日：行情时间戳是今天 → true → 10 分钟采集链全天延续（含午休 slot，不再因无方向信号中断）。
+- 替代 v11 的 `capturedAny`（是否存了方向快照）判据。
+- 新增 `quoteTimeIsOnDate(time, yyyyMMdd)`：容忍分隔符变体（`20260807102532` / `2026-08-07 10:25:32`），可单测。
+
+### 2. 测试与验证
+
+- `MarketDataTest` 新增用例：行情时间戳日期判定（同日/上一交易日/空/前缀不足，含分隔符变体）。
+- 实测 `gradlew :app:testDebugUnitTest` = **204/0 通过**；`assembleDebug` 构建通过。
+
+**仍待数据积累**：阈值/权重标定（v3 主体）；回填用当前价近似（v10 §4d，标定时按 outcome30Ms 过滤评估）。
+
+---
+
+## v11 改动（2026-08-07：v10 评审剩余小问题收尾）
+
+> 依据 `INTRADAY_SIGNAL_REVIEW.md` v10 评审：收口 v7 残余中间带、v8 ③ 锁粒度、v10 §2 周末采集折中、v10 §4 注意项 b/c/e。
+
+### 1. 残余中间带收口 ✅（v7 §3）
+
+- `BUY_FROM_HIGH_MAX` 由 −1.0 收紧到 −0.5：距日内高点回落 ≥0.5% 禁买，消除 `fromHigh ∈ (−1.0, −0.5]` 且短动量仍正时可出 BUY 的盲区；测试用例 25 固化边界。
+- 行为更保守："回踩买点"（回落 0.5%–1%）不再出 BUY，与"不追回落"护栏语义一致；待数据积累后可参数化回退。
+
+### 2. 顶部反转原因覆盖补齐 ✅（v7 §3 轻微项）
+
+- 双条件同时命中（短动量转弱 + 距高点回落）时两个原因都展示，不再 if/else if 只显示一个。
+
+### 3. 指数分钟缓存进程级共享 ✅（v8 ③）
+
+- 新增 `IndexMinuteCache`（60 秒 TTL + Mutex 双重校验），`StockViewModel` / `PredictionViewModel` 共用，消除同进程内每 VM 各发一次指数请求的重复。
+
+### 4. 方向语义显式化 ✅（v10 §4e）
+
+- `IntradaySignal` 新增 `direction` 字段（BUY→看涨 / SELL→看跌 / 看跌 NO_TRADE→看跌 / 其余 null），`directionOf` 直接取字段，不再依赖"看跌"文案字符串匹配（文案变化不再静默失效）。
+
+### 5. 引擎与调度纵深防御 ✅（v10 §4b/4c）
+
+- `runPrediction` 引擎层增加 `isPredictionWindow` 守卫：即使未来恢复手动预测入口，盘中价也不会污染历史记录。
+- `PredictionScheduler.delayToNext` 统一 Asia/Shanghai 时区：设备时区错置时 9:25 调度与窗口校验不再互相矛盾。
+
+### 6. 调休周末后台自动采集 ✅（v10 §2 折中收口）
+
+- `scheduleIntradayNext(continueOnWeekend)`：首次调度允许落在周末（调休交易日 10:10 自动采集，采集到方向信号后 10 分钟链继续）；普通周末空跑一次后自动跳到下周一。
+- 原"调休周末仅手动刷新"折中解除。
+
+### 7. 测试与验证
+
+- 新增用例 25（回落中间带）；方向映射改为显式语义 + 集成断言；PredictionEngineTest 全部 `runPrediction` 调用改到 9:25 窗口内。
+- 实测 `gradlew :app:testDebugUnitTest` = **203/0 通过**；`assembleDebug` 构建通过。
+
+**仍待数据积累**：阈值/权重标定（v3 主体）；回填用当前价近似（v10 §4d，标定时按 outcome30Ms 过滤评估）。
+
+## v10 改动（2026-08-07：评审遗留项落实 —— 周末调休 / 指数接口实测 / 统计口径修正 / 竞价窗口与 F1 阈值）
+
+> 依据 `INTRADAY_SIGNAL_REVIEW.md` 全量评估：落实 v8 评审②（周末调休）、闭环"指数分钟接口待验证"、修正 v9 统计口径自身缺陷，并修复该文档跨引用的竞价引擎三项待办（MODEL_REVIEW v6 ①②③）。
+
+### 1. 指数分钟接口实测 ✅（闭环 v8 §1.3⑥ / v9 §3）
+
+实测 `https://web.ifzq.gtimg.cn/appstock/app/minute/query` 对 `sz399006 / sz399001 / sh000001 / sh000688` 均返回与个股同格式的分钟数据（`"0930 3472.15 1703047 6052505881.54"`），`parseMinuteData` 可直接解析。**rsIndex 基准全链路可用，无需降级**；"待真机验证"项关闭。
+
+### 2. 周末调休交易日支持 ✅（v8 评审②）
+
+**代码**：`IntradaySignal.kt`、`PredictionWorkers.kt`
+
+- `wallClockPhase` 不再无条件把周末判 CLOSED（仅保留 ≥15:00 的收盘兜底）；周末是否交易日由**数据 + 新鲜度校验**决定（数据优先）。
+  - 普通周末残留数据：数据相位"已收盘"或新鲜度校验"数据异常"拦截；
+  - 调休周末交易日：实时数据与墙钟对齐 → 正常出信号（用例 23）。
+- `IntradaySignalWorker` 删除周末硬跳过：普通周末因无方向信号不存快照，调休周末正常采集。
+- 已知折中：后台采集调度仍按周一至周五排班（普通周末省电），调休周末交易日可手动刷新出信号（与竞价 worker 的国产 ROM 延迟同属尽力而为）。
+
+### 3. 快照统计口径修正 ✅（v9 自评估发现）
+
+**代码**：`IntradaySignal.kt`、`IntradaySignalStore.kt`、`PredictionWorkers.kt`
+
+- `IntradaySignalSnapshot` 新增 `direction` 字段（采集时刻固化）；新增 `directionOf(signal)`：BUY→看涨、SELL→看跌、**仅"看跌"语义的 NO_TRADE→看跌**，状态类 NO_TRADE（数据积累中/午休/已收盘/数据异常）与 WATCH/HOLD 无方向。
+- 修复 v9 缺陷：此前 NO_TRADE 一律按看跌计方向，"数据积累中"快照会污染命中率。
+- `statsOf` 净变动只计可执行的 BUY/SELL（看跌 NO_TRADE 未交易，不扣成本、不计收益）。
+- Worker 只保存有方向的快照，普通周末/状态信号不进入统计。
+
+### 4. 竞价引擎窗口与 F1 阈值 ✅（MODEL_REVIEW v6 ①②③）
+
+**代码**：`PredictionEngine.kt`、`PredictionWorkers.kt`、`Calibration.kt`
+
+- ① 竞价 worker 迟到污染（高）：`PredictWorker` 仅 9:20–9:35（Asia/Shanghai）执行，窗口外跳过当天、不落记录、不抓联动基线（盘后抓到的会是全天涨幅，污染联动学习）。
+- ② 回填窗口校验（中）：`recordOutcome30m` 仅 10:00–10:15、`recordOutcomeClose` 仅 15:00–16:00 执行，防迟到用盘中价误标 outcome。
+- ③ F1 阈值（中低）：`curveThreshold` 每个候选 t 现场 `classify(score, t)` 重算 predicted，消除固定 REF_THRESHOLD=2.0 标签在 t<2.0 时精度被系统性低估、且标定与运行时分类不一致的问题。
+
+### 5. 测试与验证
+
+- 新增：周末调休交易日、信号方向映射、回填窗口外不写结果（IntradaySignalTest 24 例 / PredictionEngineTest +1）。
+- 实测 `gradlew :app:testDebugUnitTest` = **202/0 通过**；`assembleDebug` 构建通过。
+
+**剩余（需数据积累）**：盘中信号阈值/权重标定（v3 主体）；后台采集对调休周末的自动排班（当前为手动刷新折中）。
+
+## v9 改动（2026-08-07：A 股规则补齐 + 去共线性评分 + v3 验证框架）
+
+> 依据对盘中实时信号模型的独立检阅实施（对应评审：涨跌停、T+1、指数基准、时区、数据新鲜度、因子共线性、缺回测）。
+
+### 1. A 股规则补齐 ✅
+
+**代码**：`IntradaySignal.kt`、`MarketData.kt`、`StockViewModel.kt`、`PredictionViewModel.kt`
+
+| 项 | 实现 | 测试 |
+|----|------|------|
+| 涨跌停护栏 | `priceLimitPct(stock)` 按板块识别（主板 10%、ST 5%、创业板/科创板 20%、北交所 30%）；接近涨停（距板 ≤0.5%）BUY 降级 WATCH 提示封板难买；接近跌停 SELL 降级 HOLD | 用例 16/20 |
+| T+1 可卖 | `evaluate(canSell=…)`：当日买入无可用卖出量时 SELL 降级 HOLD 并注明 T+1 冻结；调用方传 `sellableQty > 0` | 用例 17 |
+| 指数基准 | `indexCodeFor(stock)`：内置配置 > 沪主板(sh000001)/科创板(sh000688)/沪ETF(sh000300)/深主板(sz399001)/创业板(sz399006)；北交所返回 null → 信号降级（修复一律用深证成指的基准错配） | 用例 21 |
+| 时区 | `wallClockPhase`/`expectedMinuteIndex` 固定 Asia/Shanghai（落实 v8 评审①） | 用例 15 |
+| 数据新鲜度 | 交易日盘中数据位置与墙钟错位 >10 分钟 → NO_TRADE（防数据滞后/节假日残留陈旧信号） | 用例 18 |
+
+### 2. 去共线性评分（v9 公式）✅
+
+**代码**：`IntradaySignal.kt`
+
+```text
+score = 1.0×mom30 + 0.6×acc15 + 1.5×rsIndex + 2.0×aboveAvg + 0.8×volBoost
+acc15 = mom15 − mom30   // 短时加速度，替换原 mom15，消除 15/30 分钟重叠双重计价
+```
+
+- 特征层新增 `acc15`，评分不再对同一段行情计 1.8 倍权重（mom15 是 mom30 子区间）。
+- 护栏顺序：涨跌停 → 追高 → 顶部反转 → T+1；涨停线命中时优先展示"封板难买"语义。
+- 行为变化：指数缺失时分数不再含 rsIndex 加成，BUY 阈值可能达不到 → 降级 WATCH（无证据不冒进），用例 9 预期同步更新。
+
+### 3. v3 验证框架（快照 + 回填 + 统计）✅
+
+**代码**：`IntradaySignalStore.kt`（新增）、`PredictionWorkers.kt`、`PredictionViewModel.kt`、`ui/StockApp.kt`
+
+- `IntradaySignalWorker`：交易时段 10:10–14:50 每 10 分钟对全部 A 股持仓做信号快照；每次运行先给 ≥30/60 分钟前的快照回填当前价作为结果；周末自动顺延。
+- `IntradaySignalSnapshot`：信号时刻的价格/动作/分数 + 30/60 分钟结果回填（同日近似，不跨日）。
+- `statsOf()`：方向命中率（±0.15% 平盘带，复用 outcomeOf）+ 扣费后平均净变动（双边成本 0.12%），WATCH/HOLD 不计方向。
+- UI：持仓信号行新增"历史验证：命中率 x%（n 样本）· 扣费期望 +y%"，可靠性可视化。
+- 调度：`PredictionScheduler.scheduleIntradayNext` 自续链，随 `ensureScheduled` 启动。
+
+### 4. 测试与验证
+
+- `IntradaySignalTest.kt` 15 → 22 例（新增涨跌停/T+1/数据新鲜度/acc15/涨跌停幅度/指数基准/信号统计）。
+- 实测 `gradlew :app:testDebugUnitTest` = **199/0 通过**；`assembleDebug` 构建通过。
+
+**剩余（需数据积累）**：用积累的快照 + 结果回填标定 BUY/SELL 阈值与权重（沿用 Calibration 衰减加权思路）；本期先完成数据采集与统计框架。
+
 ## v8 改动（2026-08-06：评审 §1.3 剩余边界与注意事项）
 
 > 对应 INTRADAY_SIGNAL_REVIEW.md §1.3 剩余项（⑤墙钟兜底 / ⑦指数拉取去重 / ⑩阈值边界）及 §2.2b 落实。⑧⑨ 已在 v7 完成。

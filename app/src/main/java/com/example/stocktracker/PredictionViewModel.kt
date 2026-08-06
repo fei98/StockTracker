@@ -11,20 +11,20 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /** 盘中实时信号 UI 状态（当前股票 + 全部持仓） */
 class PredictionViewModel(
-    private val api: StockApi = StockApi()
+    private val api: StockApi = StockApi(),
+    private val signalStore: IntradaySignalStore? = null
 ) : ViewModel() {
 
     data class HoldingSignal(
         val stock: Stock,
         val signal: IntradaySignal?,
         val prevClose: Double?,
-        val hasPosition: Boolean
+        val hasPosition: Boolean,
+        val stats: IntradaySignalStats? = null
     )
 
     data class UiState(
@@ -38,21 +38,13 @@ class PredictionViewModel(
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
-    // 指数分钟线缓存（60 秒 TTL），个股分钟线按需刷新
-    private var indexCacheCode: String? = null
-    private var indexCacheAt = 0L
-    private var indexCachePoints: List<MinutePoint>? = null
-
-    // 指数拉取互斥锁（评审 §1.3⑦）：refreshAll 多股共享同指数代码时，并发只发起一次真实请求
-    private val indexMutex = Mutex()
-
     private var currentJob: Job? = null
     private var currentSeq = 0
     private var allJob: Job? = null
     private var allSeq = 0
 
     /** 刷新当前选中股票的盘中信号（竞态：后发请求生效） */
-    fun refresh(stock: Stock, prevClose: Double?, hasPosition: Boolean) {
+    fun refresh(stock: Stock, prevClose: Double?, hasPosition: Boolean, canSell: Boolean = true) {
         val token = ++currentSeq
         currentJob?.cancel()
         _ui.update { it.copy(stock = stock) }
@@ -67,7 +59,11 @@ class PredictionViewModel(
                 it.copy(
                     running = false,
                     signal = pts?.let { p ->
-                        IntradaySignalEvaluator.evaluate(p, index, prevClose, hasPosition, System.currentTimeMillis())
+                        IntradaySignalEvaluator.evaluate(
+                            p, index, prevClose, hasPosition, System.currentTimeMillis(),
+                            priceLimitPct = priceLimitPct(stock),
+                            canSell = canSell
+                        )
                     },
                     error = if (pts == null) "行情获取失败，请检查网络" else null
                 )
@@ -90,10 +86,15 @@ class PredictionViewModel(
                         val pts = api.fetchIntraday(acc.stock)
                         val signal = pts?.let {
                             IntradaySignalEvaluator.evaluate(
-                                it, index, acc.prevClose, acc.totalQty > 0, System.currentTimeMillis()
+                                it, index, acc.prevClose, acc.totalQty > 0, System.currentTimeMillis(),
+                                priceLimitPct = priceLimitPct(acc.stock),
+                                canSell = acc.sellableQty > 0
                             )
                         }
-                        HoldingSignal(acc.stock, signal, acc.prevClose, acc.totalQty > 0)
+                        val stats = signalStore?.let {
+                            statsOf(it.loadSnapshots(acc.stock.marketCode, PredictionEngine.today()))
+                        }
+                        HoldingSignal(acc.stock, signal, acc.prevClose, acc.totalQty > 0, stats)
                     }
                 }.awaitAll()
             }
@@ -102,20 +103,6 @@ class PredictionViewModel(
         }
     }
 
-    private suspend fun fetchIndexPoints(stock: Stock): List<MinutePoint>? {
-        val code = TencentMarketDataApi.SECTOR_MAP[stock.marketCode]?.indexCode
-            ?: TencentMarketDataApi.FALLBACK_CONFIG.indexCode
-        val now = System.currentTimeMillis()
-        if (indexCacheCode == code && now - indexCacheAt < 60_000) return indexCachePoints
-        return indexMutex.withLock {
-            val now2 = System.currentTimeMillis()
-            if (indexCacheCode == code && now2 - indexCacheAt < 60_000) return@withLock indexCachePoints
-            val indexStock = Stock(code = code.substring(2), name = "", market = code.substring(0, 2))
-            val pts = api.fetchIntraday(indexStock)
-            indexCacheCode = code
-            indexCacheAt = now2
-            indexCachePoints = pts
-            pts
-        }
-    }
+    private suspend fun fetchIndexPoints(stock: Stock): List<MinutePoint>? =
+        IndexMinuteCache.fetch(api, stock)
 }

@@ -182,6 +182,24 @@ class TencentMarketDataApi(
 
         /** 隔夜外围：道指/纳指/标普（凌晨收盘，9:25 决策时已定局） */
         val EXTERNAL_CODES = listOf("usDJI", "usIXIC", "usINX")
+
+        /**
+         * 盘中信号相对强弱基准（v9）：内置配置 > 按市场/板块映射；北交所暂无分钟指数支持 → null（信号降级）。
+         * 修复此前未配置股票一律用深证成指导致沪市/科创板基准错配的问题。
+         */
+        fun indexCodeFor(stock: Stock): String? {
+            SECTOR_MAP[stock.marketCode]?.let { return it.indexCode }
+            val code = stock.code
+            return when {
+                stock.market == "sh" && code.startsWith("68") -> "sh000688" // 科创板 → 科创50
+                stock.market == "sh" && code.startsWith("5") -> "sh000300"  // 沪市 ETF → 沪深300
+                stock.market == "sh" && code.startsWith("6") -> "sh000001"  // 沪主板 → 上证指数
+                stock.market == "sz" && code.startsWith("30") -> "sz399006" // 创业板 → 创业板指
+                stock.market == "sz" &&
+                    (code.startsWith("0") || code.startsWith("1") || code.startsWith("2")) -> "sz399001" // 深主板/深ETF → 深证成指
+                else -> null
+            }
+        }
     }
 }
 
@@ -203,3 +221,11 @@ fun parseQuoteFields(raw: String): QuoteFields? {
         time = parts.getOrNull(30)?.trim().orEmpty()
     )
 }
+
+/**
+ * 判断行情时间戳是否属于指定日期（yyyyMMdd）。
+ * 腾讯时间戳可能带分隔符（"20260807102532" / "2026-08-07 10:25:32"），
+ * 统一取数字前缀比较，用于判定调休周末等"是否真实交易日"。
+ */
+fun quoteTimeIsOnDate(time: String, yyyyMMdd: String): Boolean =
+    time.filter { it.isDigit() }.startsWith(yyyyMMdd)

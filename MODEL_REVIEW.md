@@ -1,24 +1,48 @@
 # 竞价预测模型评审报告
 
 > 按 `MODEL_CHANGES.md` 各轮改动同步更新，与 `MODEL_CHANGES.md` 配合维护。
-> **约定：最新评审放最前面（`## v6 评审` 为最新），旧评审依次后移。**
+> **约定：最新评审放最前面（`## v7 评审` 为最新），旧评审依次后移。**
 
 ---
 
-## 当前状态（v6）
+## 当前状态（v7）
 
-| 维度 | v3 | v4 | v5 | v6 | 说明 |
-|------|-----|-----|-----|-----|------|
-| 因子质量 | 8 | 8.5 | 8.5 | 8.5 | 竞价引擎未变；盘中信号为独立规则模型 |
-| 评分公式 | 7 | 8 | 8 | 8 | 竞价引擎未变 |
-| 标定框架 | 9 | 9 | 9 | 9.5 | +同日去重，历史数据卫生提升 |
-| 工程纪律 | 9 | 9 | 9 | 9.5 | +去重回归、并发 token 防护 |
-| 性能 | 7 | 6.5 | 7.5 | 7.5 | 竞价引擎未变 |
-| 可测试性 | 9 | 9 | 9 | 9.5 | 189 用例（含 IntradaySignalTest 12 例） |
+| 维度 | v3 | v4 | v5 | v6 | v7 | 说明 |
+|------|-----|-----|-----|-----|-----|------|
+| 因子质量 | 8 | 8.5 | 8.5 | 8.5 | 8.5 | 竞价引擎未变；盘中信号为独立规则模型 |
+| 评分公式 | 7 | 8 | 8 | 8 | 8 | 竞价引擎未变 |
+| 标定框架 | 9 | 9 | 9 | 9.5 | 9.5 | +同日去重；v7 修复 F1 阈值按候选重算 |
+| 工程纪律 | 9 | 9 | 9 | 9.5 | 9.5 | +v7 补 worker/回填窗口校验（防迟到污染） |
+| 性能 | 7 | 6.5 | 7.5 | 7.5 | 7.5 | 竞价引擎未变 |
+| 可测试性 | 9 | 9 | 9 | 9.5 | 9.5 | 202 用例（含 IntradaySignalTest 24 例） |
 
 ---
 
-## v6 评审（最新，对应 MODEL_CHANGES.md v6）
+## v7 评审（最新，对应 MODEL_CHANGES.md v9/v10 竞价引擎部分）
+
+> 落实 v6 评审遗留的 ①②③：竞价 worker 迟到污染记录、回填窗口校验、F1 阈值 predicted 不随候选阈值重算。
+> 验证基准：全量 202 用例通过（`gradlew :app:testDebugUnitTest`）；`assembleDebug` 构建通过。
+
+### 1. ①②③ 落实情况
+
+| v6 评审问题 | 处理 | 代码证据 | 结果 |
+|------------|------|----------|------|
+| ① 竞价 worker 迟到 → 盘中价污染历史记录（高） | `PredictWorker` 仅 9:20–9:35（Asia/Shanghai）执行；窗口外跳过当天、不落记录、不抓联动基线 | `PredictionEngine.isPredictionWindow`；`PredictionWorkers.kt` PredictWorker | ✅ |
+| ② 结果回填迟到 → outcome 误标（中） | `recordOutcome30m` 限 10:00–10:15、`recordOutcomeClose` 限 15:00–16:00，窗口外直接返回 | `PredictionEngine.isOutcome30mWindow/isOutcomeCloseWindow`；测试"窗口外不写结果" | ✅ |
+| ③ F1 阈值 predicted 不随候选 t 重算（中低） | `curveThreshold` 每个候选 t 现场 `classify(score, t)`，标定与运行时分类一致 | `Calibration.kt` curveThreshold | ✅ |
+
+### 2. 结论
+
+v6 ①②③ 全部落实；窗口外迟到任务不再污染历史记录与联动基线，阈值标定不再系统性偏向 ≥2.0。
+
+### 3. v11 纵深防御补充
+
+- `runPrediction` 引擎层新增 `isPredictionWindow` 守卫（v10 §4b）：即使未来恢复手动预测入口，盘中价也不会污染历史记录。
+- `PredictionScheduler.delayToNext` 统一 Asia/Shanghai 时区（v10 §4c）：设备时区错置时 9:25 调度与窗口校验不再互相矛盾。
+
+---
+
+## v6 评审（历史，对应 MODEL_CHANGES.md v6）
 
 > 本次为**结合代码复核 `MODEL_CHANGES.md`** 的全面评审：逐项核验 v4/v5/v6 声明与代码一致性，并新发现问题。
 > 验证基准：全量 189 用例通过（`gradlew :app:testDebugUnitTest`）。
@@ -243,7 +267,7 @@ SharedPreferences (JSON)
 | `MarketDataTest.kt` | 行情字段解析 |
 | `SectorLearnerTest.kt` | 皮尔逊相关、自动推荐、关键词匹配 |
 
-> 全量 189 用例，0 失败（含 IntradaySignalTest 12 例、同日去重回归 1 例）。
+> 全量 202 用例，0 失败（当前实测；含 IntradaySignalTest 24 例）。
 
 ---
 
@@ -257,6 +281,7 @@ SharedPreferences (JSON)
 | v4 | 多目标投票、加权广度、合成权重搜索、交互项、F1阈值 | 见 v4 评审 |
 | v5 | votedSeries缓存、strengthHistory目标特定权重 | 见 v5 评审 |
 | v6 | 盘中实时信号重构、同日去重修复、UI 下线竞价详情 | 见 v6 评审（顶部） |
+| v7 | 竞价 worker/回填窗口校验、F1 阈值按候选重算（v10） | 见 v7 评审（顶部） |
 
 ---
 
@@ -264,7 +289,7 @@ SharedPreferences (JSON)
 
 | 优先级 | 事项 | 状态 |
 |--------|------|------|
-| 高 | 竞价 worker/结果回填 增加交易时段窗口校验（v6 评审 ① ②） | ⏳ 待修 |
+| 高 | 竞价 worker/结果回填 增加交易时段窗口校验（v6 评审 ① ②） | ✅ v7 已修 |
 | 低 | 8.5 硬编码常数参数化 (VOL_Z_DIV / STREAK_DIV 等) | ⏳ 待定 |
 | 低 | 8.6 存储层升级 SharedPreferences → Room | ⏳ 待定 |
 

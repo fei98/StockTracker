@@ -76,14 +76,14 @@ class PredictionEngineTest {
     private val date = "2026-08-05"
 
     /** 本地时区的某时刻（测试用） */
-    private fun timeAt(hour: Int, minute: Int): Long = java.util.Calendar.getInstance().apply {
+    private fun timeAt(hour: Int, minute: Int): Long = java.util.Calendar.getInstance(IntradaySignalEvaluator.CN_TZ).apply {
         set(java.util.Calendar.HOUR_OF_DAY, hour)
         set(java.util.Calendar.MINUTE, minute)
         set(java.util.Calendar.SECOND, 0)
         set(java.util.Calendar.MILLISECOND, 0)
     }.timeInMillis
 
-    private val morning = timeAt(10, 0)      // 10:00（非观察区）
+    private val morning = timeAt(9, 25)      // 9:25 竞价预测执行窗口内（v11 引擎层窗口守卫）
     private val etf = Stock("159915", "创业板ETF华夏", "sz")
     private val starNet = Stock("002396", "星网锐捷", "sz")
 
@@ -187,15 +187,33 @@ class PredictionEngineTest {
         engine.runPrediction(etf, false, date, morning)
 
         api.snapshots[etf.marketCode] = MarketSnapshot(quote(price = 3.60), null, emptyList(), emptyList())
-        engine.recordOutcome30m(etf, date)
+        engine.recordOutcome30m(etf, date, timeAt(10, 5))
         assertEquals(PredictionOutcome.UP, store.loadRecords(etf.marketCode)[0].outcome30m)
 
         api.snapshots[etf.marketCode] = MarketSnapshot(quote(price = 3.40), null, emptyList(), emptyList())
-        engine.recordOutcomeClose(etf, date)
+        engine.recordOutcomeClose(etf, date, timeAt(15, 5))
         val rec = store.loadRecords(etf.marketCode)[0]
         assertEquals(PredictionOutcome.DOWN, rec.outcomeCloseVsOpen)  // 3.40 vs open 3.542
         assertEquals(PredictionOutcome.DOWN, rec.outcomeDayVsPrev)    // 3.40 vs prevClose 3.514
         assertEquals(3.40, store.loadSnapshots(etf.marketCode).last().close, 0.0001)
+    }
+
+    @org.junit.Test
+    fun 结果回填_窗口外不写结果() = runTest {
+        // v10：回填有执行窗口（30分钟 10:00–10:15 / 收盘 15:00–16:00），迟到用盘中价误标会被拦截
+        val store = FakeSnapshotStore()
+        storeWithBaseline(store)
+        val api = snapOf(MarketSnapshot(quote(), null, emptyList(), emptyList()))
+        val engine = PredictionEngine(api, store)
+        engine.runPrediction(etf, false, date, timeAt(9, 25))
+
+        api.snapshots[etf.marketCode] = MarketSnapshot(quote(price = 3.60), null, emptyList(), emptyList())
+        engine.recordOutcome30m(etf, date, timeAt(11, 0))   // 已过 30 分钟回填窗口
+        engine.recordOutcomeClose(etf, date, timeAt(14, 0)) // 未到收盘回填窗口
+        val rec = store.loadRecords(etf.marketCode)[0]
+        assertNull(rec.outcome30m)
+        assertNull(rec.outcomeCloseVsOpen)
+        assertNull(rec.outcomeDayVsPrev)
     }
 
     @org.junit.Test
@@ -227,7 +245,7 @@ class PredictionEngineTest {
         // 积累 25 天记录并回填结果
         repeat(25) { d ->
             val day = "2026-06-${d + 1}"
-            engine.runPrediction(etf, false, day, timeAt(10, 0))
+            engine.runPrediction(etf, false, day, timeAt(9, 25))
             store.updateOutcomes(etf.marketCode, day, PredictionOutcome.UP, PredictionOutcome.UP, PredictionOutcome.UP)
         }
         val s1 = engine.votedSeries(etf, date)
