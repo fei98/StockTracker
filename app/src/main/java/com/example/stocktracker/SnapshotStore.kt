@@ -41,7 +41,8 @@ class PrefsSnapshotStore(context: Context) : SnapshotStore {
         prefs.getString(keyOf(KEY_SNAPSHOTS, stock), null)?.let(::parseSnapshots).orEmpty()
 
     override fun addSnapshot(stock: String, s: DailySnapshot) {
-        val list = (loadSnapshots(stock) + s).takeLast(40)
+        // 同日去重：重复预测只保留最新快照，避免污染放量基线（重复点击评分逐次走低的根因）
+        val list = (loadSnapshots(stock).filterNot { it.date == s.date } + s).takeLast(40)
         prefs.edit().putString(keyOf(KEY_SNAPSHOTS, stock), buildSnapshots(list)).apply()
     }
 
@@ -63,7 +64,8 @@ class PrefsSnapshotStore(context: Context) : SnapshotStore {
         prefs.getString(keyOf(KEY_RECORDS, stock), null)?.let(::parseRecords).orEmpty()
 
     override fun addRecord(stock: String, r: PredictionRecord) {
-        val list = (loadRecords(stock) + r).takeLast(200)
+        // 同日去重：重复预测只保留最新记录，避免历史标定被同日重复样本加权
+        val list = (loadRecords(stock).filterNot { it.date == r.date } + r).takeLast(200)
         prefs.edit().putString(keyOf(KEY_RECORDS, stock), buildRecords(list)).apply()
     }
 

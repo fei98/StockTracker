@@ -2,112 +2,107 @@ package com.example.stocktracker
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
-/** 竞价预测 UI 状态（绑定当前选中的股票） */
+/** 盘中实时信号 UI 状态（当前股票 + 全部持仓） */
 class PredictionViewModel(
-    private val engine: PredictionEngine,
-    private val store: SnapshotStore
+    private val api: StockApi = StockApi()
 ) : ViewModel() {
+
+    data class HoldingSignal(
+        val stock: Stock,
+        val signal: IntradaySignal?,
+        val prevClose: Double?,
+        val hasPosition: Boolean
+    )
 
     data class UiState(
         val stock: Stock? = null,
+        val signal: IntradaySignal? = null,
+        val allSignals: List<HoldingSignal> = emptyList(),
         val running: Boolean = false,
-        val result: PredictionResult? = null,
-        val allResults: List<PredictionResult> = emptyList(),
-        val observation: ObservationInfo? = null,
-        val inObservationPhase: Boolean = false,
-        val stats: Map<TargetType, WalkForwardStats> = emptyMap(),
-        val sectorSource: SectorSource? = null,   // 板块联动来源
-        val sectorDetail: String = "数据积累中",   // 联动名单说明
         val error: String? = null
     )
 
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
-    init {
-        refresh()
-    }
+    // 指数分钟线缓存（60 秒 TTL），个股分钟线按需刷新
+    private var indexCacheCode: String? = null
+    private var indexCacheAt = 0L
+    private var indexCachePoints: List<MinutePoint>? = null
 
-    /** 切股时刷新该股数据 */
-    fun refresh(stock: Stock? = null) {
-        val s = stock ?: _ui.value.stock ?: return
-        val date = PredictionEngine.today()
-        val resolved = SectorResolver.resolve(s, store)
-        _ui.update {
-            it.copy(
-                stock = s,
-                result = store.loadLastResult(s.marketCode)?.takeIf { r -> r.date == date },
-                observation = engine.observationInfo(s, date),
-                inObservationPhase = PredictionEngine.isObservationPhase(System.currentTimeMillis()),
-                stats = engine.walkForwardStats(s, date),
-                sectorSource = resolved.source,
-                sectorDetail = resolved.detail,
-                error = null
-            )
-        }
-    }
+    private var currentJob: Job? = null
+    private var currentSeq = 0
+    private var allJob: Job? = null
+    private var allSeq = 0
 
-    /** 手动选行业（null = 恢复自动推荐/清除配置） */
-    fun setSector(stock: Stock, industry: String?) {
-        store.setUserSector(stock.marketCode, industry)
-        refresh(stock)
-    }
-
-    /** 手动预测当前选中股票；9:20 前返回观察区提示 */
-    fun predict(stock: Stock, hasPosition: Boolean) {
-        if (PredictionEngine.isObservationPhase(System.currentTimeMillis())) {
-            _ui.update { it.copy(error = "当前为竞价观察区（9:15–9:20），9:20 后可预测") }
-            return
-        }
-        if (!PredictionEngine.isPredictable(stock)) {
-            _ui.update { it.copy(error = "港股/美股无集合竞价，不支持预测") }
-            return
-        }
-        if (_ui.value.running) return
-        viewModelScope.launch {
-            _ui.update { it.copy(running = true, error = null) }
-            val result = engine.runPrediction(stock, hasPosition)
+    /** 刷新当前选中股票的盘中信号（竞态：后发请求生效） */
+    fun refresh(stock: Stock, prevClose: Double?, hasPosition: Boolean) {
+        val token = ++currentSeq
+        currentJob?.cancel()
+        _ui.update { it.copy(stock = stock) }
+        currentJob = viewModelScope.launch {
+            val (index, pts) = withContext(Dispatchers.IO) {
+                val index = fetchIndexPoints(stock)
+                val pts = api.fetchIntraday(stock)
+                index to pts
+            }
+            if (token != currentSeq) return@launch
             _ui.update {
                 it.copy(
                     running = false,
-                    result = result,
-                    error = if (result == null) "预测失败：行情获取异常，请检查网络后重试" else null
+                    signal = pts?.let { p -> IntradaySignalEvaluator.evaluate(p, index, prevClose, hasPosition) },
+                    error = if (pts == null) "行情获取失败，请检查网络" else null
                 )
             }
-            refresh(stock)
         }
     }
 
-    /** 一键预测全部 A 股持仓（结果展示在账户总览） */
-    fun predictAll(accounts: List<StockAccount>) {
-        if (PredictionEngine.isObservationPhase(System.currentTimeMillis())) {
-            _ui.update { it.copy(error = "当前为竞价观察区（9:15–9:20），9:20 后可预测") }
-            return
-        }
-        if (_ui.value.running) return
+    /** 刷新全部持仓的盘中信号（并发拉取，指数 60 秒缓存复用） */
+    fun refreshAll(accounts: List<StockAccount>) {
         val stocks = accounts.filter { PredictionEngine.isPredictable(it.stock) }
-        if (stocks.isEmpty()) {
-            _ui.update { it.copy(error = "没有可预测的 A 股持仓") }
-            return
-        }
-        viewModelScope.launch {
-            _ui.update { it.copy(running = true, error = null) }
-            val results = stocks.mapNotNull { acc ->
-                engine.runPrediction(acc.stock, hasPosition = acc.totalQty > 0)
+        if (stocks.isEmpty()) return
+        val token = ++allSeq
+        allJob?.cancel()
+        _ui.update { it.copy(running = true) }
+        allJob = viewModelScope.launch {
+            val rows = withContext(Dispatchers.IO) {
+                stocks.map { acc ->
+                    async {
+                        val index = fetchIndexPoints(acc.stock)
+                        val pts = api.fetchIntraday(acc.stock)
+                        val signal = pts?.let {
+                            IntradaySignalEvaluator.evaluate(it, index, acc.prevClose, acc.totalQty > 0)
+                        }
+                        HoldingSignal(acc.stock, signal, acc.prevClose, acc.totalQty > 0)
+                    }
+                }.awaitAll()
             }
-            _ui.update {
-                it.copy(
-                    running = false,
-                    allResults = results,
-                    error = if (results.isEmpty()) "预测失败：行情获取异常，请检查网络后重试" else null
-                )
-            }
+            if (token != allSeq) return@launch
+            _ui.update { it.copy(running = false, allSignals = rows) }
         }
+    }
+
+    private suspend fun fetchIndexPoints(stock: Stock): List<MinutePoint>? {
+        val code = TencentMarketDataApi.SECTOR_MAP[stock.marketCode]?.indexCode
+            ?: TencentMarketDataApi.FALLBACK_CONFIG.indexCode
+        val now = System.currentTimeMillis()
+        if (indexCacheCode == code && now - indexCacheAt < 60_000) return indexCachePoints
+        val indexStock = Stock(code = code.substring(2), name = "", market = code.substring(0, 2))
+        val pts = api.fetchIntraday(indexStock)
+        indexCacheCode = code
+        indexCacheAt = now
+        indexCachePoints = pts
+        return pts
     }
 }

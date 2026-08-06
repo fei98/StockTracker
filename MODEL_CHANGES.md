@@ -89,3 +89,69 @@
 ./gradlew :app:testDebugUnitTest   # 147 用例（v5），0 失败
 ./gradlew :app:assembleDebug       # 构建通过
 ```
+
+---
+
+## v6 改动（2026-08-06：盘中实时预测重构 + 数据去重修复）
+
+> 本轮不涉及竞价模型公式本身，方向：把"9:25 竞价一次性预测"的展示层重构为"盘中实时信号"，并修复重复点击预测按钮导致评分逐次下降的 bug。竞价后台引擎（PredictionWorkers）保持不变。
+
+### 1. 新增盘中信号模块 ✅ 已实施
+
+**改动文件**：`IntradaySignal.kt`（新增，纯函数无 IO）
+
+- `IntradaySignalEvaluator.evaluate(points, dayGainPct, prevClose, hasPosition)` 输出 `IntradaySignal`
+- 评分（单位=百分点，相对昨收的涨跌幅口径）：
+  `score = 1.0×mom15 + 0.8×mom30 + 1.5×rsIndex + 2.0×aboveAvg + 0.8×volBoost`
+  - `mom15/mom30`：最近 15/30 分钟涨跌幅
+  - `rsIndex`：个股相对板块指数的分钟涨跌差（指数代码 `TencentMarketDataApi.SECTOR_MAP[marketCode]?.indexCode ?: FALLBACK_CONFIG.indexCode`）
+  - `aboveAvg`：当前价相对当日均价（VWAP）偏离；`volBoost`：近 5 分钟量比突增（>1.5 倍）
+- 阈值：`BUY ≥ +2.5`、`SELL ≤ −2.5`
+- **追高拦截**：`(dayGain > 2% 或 mom30 > 1.5%) 且 fromHigh > −0.5%` 时，BUY 降级为 WATCH 并附加"追高风险大"原因
+- **持仓分支**：有持仓时 score ≤ −2.5 → SELL，其余情况 HOLD（不再输出 BUY 语义）
+- **时段语义**（按分钟列表位置，11:30 与 13:00 均映射位置 120）：
+  - 位置 < 40 或 121~150 → NO_TRADE("数据积累中")
+  - 位置 = 120 → NO_TRADE("午间休市")
+  - 位置 ≥ 240 → NO_TRADE("已收盘")
+  - 不足 40 个点 → NO_TRADE("数据积累中")
+- `NO_TRADE` 保留评分与原因字段，仅 action 无交易语义（供 UI 展示）
+
+### 2. PredictionViewModel 重写 ✅ 已实施
+
+**改动文件**：`PredictionViewModel.kt`（整体重写）
+
+- 依赖从 `PredictionEngine + PrefsSnapshotStore` 简化为仅 `StockApi`
+- 新接口：`refresh(stock, prevClose, hasPosition)`（单股）、`refreshAll(accounts)`（并发全部持仓）
+- 新增 `HoldingSignal(stock, signal)` 与 `UiState(allSignals, running, error)`
+- 指数分钟线 60 秒缓存（`indexCacheCode/indexCacheAt/indexCachePoints`），多股复用
+- 自增 token 竞态保护：旧请求返回时若 token 不匹配则丢弃，防止乱序覆盖
+
+### 3. UI 改造 ✅ 已实施
+
+**改动文件**：`ui/StockApp.kt`
+
+- **预测卡片**：标题"竞价预测"→"盘中实时预测 · {股票名}"；按钮"开始预测"→"刷新"；内容区显示 `SignalBanner`（动作+分数+原因+追高警告）
+- **自动刷新**：`LaunchedEffect(predStock?.marketCode)` 切换股票或每 30 秒自动 `refresh`；`refreshAll` 同理在总览页停留期间 30 秒刷新
+- **总览第 4 标签**："预测"→"盘中信号"；列表渲染 `predUi.allSignals`（名称+动作+分数+原因摘要）；**每次点击标签立即刷新**（不依赖 30 秒），面板头部新增"刷新"按钮；SegmentedButton 通过 `icon = {}` 去掉选中勾图标（防 4 个标签文字被挤出）
+- **移除**：`PredictionDetailDialog`（竞价详情/单目标回测）、`SectorPickerDialog`（行业联动配置入口）、`showPredDetail/showSectorPicker` 状态。竞价引擎本身与通知保持不变，仅 UI 入口下线
+- **分时弹窗**（StockViewModel）：`signal: StateFlow<IntradaySignal?>` + 60 秒指数缓存，弹窗内展示信号横幅
+
+### 4. 数据去重修复 ✅ 已实施（bug）
+
+**改动文件**：`SnapshotStore.kt`、`PredictionEngineTest.kt`
+
+- **根因**：`addRecord`/`addSnapshot` 无同日去重。同一股票当天多次点击预测会向 40 天放量基线（volZ）和 200 条历史记录灌入多条当日数据，把当日巨额成交额计入 baseline → volZ 被稀释 → 评分逐次下降；同日快照还污染次日标定
+- **修复**：`addSnapshot` 按 `date` 过滤替换同日后 `takeLast(40)`；`addRecord` 同法 `.takeLast(200)`；`FakeSnapshotStore`（测试用）同步去重行为
+- **回归测试**：`同日重复预测_不产生重复记录或快照`（3 次点击 → 仅 1 条记录、11 条快照）
+
+### 5. 测试与验证
+
+**新增测试**：`IntradaySignalTest.kt` 12 例（阈值分档、追高拦截、午休/收盘/积累中时段、11:30 与 13:00 同位置取点、持仓分支、放量加分、NO_TRADE 保留评分原因）
+
+```
+./gradlew :app:testDebugUnitTest   # 全量通过（PredictionEngineTest 12 例含新回归，IntradaySignalTest 12 例）
+./gradlew :app:assembleDebug       # 构建通过
+adb install -r app-debug.apk       # 已安装真机验证（设备 3B15C1012F100000）
+```
+
+**未改动**：竞价引擎（PredictionEngine/Calibration/AuctionPredictor）、PredictionWorkers（9:15/9:20/9:25 竞价任务与通知）、竞价历史记录仍在积累。

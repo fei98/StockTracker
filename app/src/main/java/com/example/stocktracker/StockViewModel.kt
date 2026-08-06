@@ -34,20 +34,48 @@ class StockViewModel(
     private val _intradayLoading = MutableStateFlow(false)
     val intradayLoading: StateFlow<Boolean> = _intradayLoading.asStateFlow()
 
+    /** 盘中择时信号（当前选中股票，随分时刷新实时更新） */
+    private val _signal = MutableStateFlow<IntradaySignal?>(null)
+    val signal: StateFlow<IntradaySignal?> = _signal.asStateFlow()
+
     private var intradayStockKey: String? = null
 
-    /** 加载当前选中股票的今日分时（切股后首次点分时重新拉取；force=true 忽略缓存强制刷新） */
+    // 指数分钟线缓存（60 秒 TTL，评审⑧；个股分钟照旧 10 秒刷新）
+    private var indexCacheCode: String? = null
+    private var indexCacheAt = 0L
+    private var indexCachePoints: List<MinutePoint>? = null
+
+    /** 加载当前选中股票的今日分时并计算盘中信号（切股后首次点分时重新拉取；force=true 强制刷新） */
     fun loadIntraday(force: Boolean = false) {
-        val stock = _state.value.selected?.stock ?: return
+        val acc = _state.value.selected ?: return
+        val stock = acc.stock
         if (_intradayLoading.value) return
         if (!force && intradayStockKey == stock.marketCode) return // 已缓存该股
         _intradayLoading.value = true
         viewModelScope.launch {
+            val index = withContext(Dispatchers.IO) { fetchIndexPoints(stock) }
             val data = withContext(Dispatchers.IO) { api.fetchIntraday(stock) }
             _intraday.value = data
             intradayStockKey = if (data != null) stock.marketCode else null
+            _signal.value = data?.let {
+                IntradaySignalEvaluator.evaluate(it, index, acc.prevClose, acc.totalQty > 0)
+            }
             _intradayLoading.value = false
         }
+    }
+
+    /** 指数分钟线（60 秒缓存，命中缓存不重拉） */
+    private suspend fun fetchIndexPoints(stock: Stock): List<MinutePoint>? {
+        val code = TencentMarketDataApi.SECTOR_MAP[stock.marketCode]?.indexCode
+            ?: TencentMarketDataApi.FALLBACK_CONFIG.indexCode
+        val now = System.currentTimeMillis()
+        if (indexCacheCode == code && now - indexCacheAt < 60_000) return indexCachePoints
+        val indexStock = Stock(code = code.substring(2), name = "", market = code.substring(0, 2))
+        val pts = api.fetchIntraday(indexStock)
+        indexCacheCode = code
+        indexCacheAt = now
+        indexCachePoints = pts
+        return pts
     }
 
     private var nextId = 1L

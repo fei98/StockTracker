@@ -32,7 +32,10 @@ class FakeSnapshotStore : SnapshotStore {
 
     override fun loadSnapshots(stock: String) = snapshots[stock]?.toList().orEmpty()
     override fun addSnapshot(stock: String, s: DailySnapshot) {
-        snapshots.getOrPut(stock) { mutableListOf() } += s
+        // 与生产实现一致：同日去重
+        val list = snapshots.getOrPut(stock) { mutableListOf() }
+        list.removeAll { it.date == s.date }
+        list += s
     }
     override fun updateClose(stock: String, date: String, close: Double, dayAmount: Double) {
         val list = snapshots[stock] ?: return
@@ -43,7 +46,10 @@ class FakeSnapshotStore : SnapshotStore {
     override fun saveStage(stock: String, s: AuctionStageSnapshot) { stages["$stock:${s.date}:${s.stage}"] = s }
     override fun loadRecords(stock: String) = records[stock]?.toList().orEmpty()
     override fun addRecord(stock: String, r: PredictionRecord) {
-        records.getOrPut(stock) { mutableListOf() } += r
+        // 与生产实现一致：同日去重
+        val list = records.getOrPut(stock) { mutableListOf() }
+        list.removeAll { it.date == r.date }
+        list += r
     }
     override fun updateOutcomes(stock: String, date: String, o30: PredictionOutcome?, ocvo: PredictionOutcome?, odvp: PredictionOutcome?) {
         val list = records[stock] ?: return
@@ -136,6 +142,28 @@ class PredictionEngineTest {
         assertEquals(date, store.loadSnapshots(etf.marketCode).last().date)
         assertEquals(3.542, store.loadSnapshots(etf.marketCode).last().open, 0.0001)
         assertTrue(result.suggestion.isNotEmpty())
+    }
+
+    @org.junit.Test
+    fun 同日重复预测_不产生重复记录或快照() = runTest {
+        val store = FakeSnapshotStore()
+        storeWithBaseline(store)
+        val api = snapOf(
+            MarketSnapshot(
+                target = quote(), indexPct = 1.0,
+                sector = listOf(SectorStock("300750", "宁德时代", 2.0)),
+                externalPct = listOf(1.0, 0.5)
+            )
+        )
+        val engine = PredictionEngine(api, store)
+        engine.runPrediction(etf, false, date, morning)  // 点 1 次
+        val scoreOnce = store.loadRecords(etf.marketCode).size
+        engine.runPrediction(etf, false, date, morning)  // 点 2 次
+        engine.runPrediction(etf, false, date, morning)  // 点 3 次
+        assertEquals(1, store.loadRecords(etf.marketCode).size)   // 记录只保留 1 条
+        assertEquals(scoreOnce, store.loadRecords(etf.marketCode).size)
+        // 当日快照同样只保留 1 条（放量基线不被重复点击污染）
+        assertEquals(11, store.loadSnapshots(etf.marketCode).size) // 10 天基线 + 当日 1 条
     }
 
     @org.junit.Test

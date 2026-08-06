@@ -94,6 +94,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.stocktracker.FeeConfig
 import com.example.stocktracker.FeeConfigStore
+import com.example.stocktracker.IntradayAction
+import com.example.stocktracker.IntradaySignal
 import com.example.stocktracker.MinutePoint
 import com.example.stocktracker.OverviewEntry
 import com.example.stocktracker.OverviewTab
@@ -151,24 +153,27 @@ fun StockApp() {
     val signatureFingerprint = remember { signatureFingerprintOf(context) }
     val state by vm.state.collectAsStateWithLifecycle()
     val acc = state.selected
-    val predStore = remember { PrefsSnapshotStore(context) }
     val predVm: PredictionViewModel = viewModel {
-        PredictionViewModel(PredictionEngine(TencentMarketDataApi(StockApi()), predStore), predStore)
+        PredictionViewModel()
     }
     val predUi by predVm.ui.collectAsStateWithLifecycle()
     val predStock = acc?.stock
 
-    // 切换选中股票时，预测卡刷新为对应股票的数据
+    // 切换选中股票时刷新盘中信号；停留期间每 30 秒自动刷新
     LaunchedEffect(predStock?.marketCode) {
-        predStock?.let { predVm.refresh(it) }
+        val a = state.selected ?: return@LaunchedEffect
+        predVm.refresh(a.stock, a.prevClose, a.totalQty > 0)
+        while (true) {
+            delay(30_000)
+            val cur = state.selected ?: break
+            predVm.refresh(cur.stock, cur.prevClose, cur.totalQty > 0)
+        }
     }
     val snackbar = remember { SnackbarHostState() }
     var showClearDialog by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
     var showTradeDialog by remember { mutableStateOf(false) }
     var showPriceDialog by remember { mutableStateOf(false) }
-    var showPredDetail by remember { mutableStateOf(false) }
-    var showSectorPicker by remember { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<Pair<Int, String>?>(null) }
     var showOverview by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
@@ -181,6 +186,7 @@ fun StockApp() {
     var showIntradayDialog by remember { mutableStateOf(false) }
     val intraday by vm.intraday.collectAsStateWithLifecycle()
     val intradayLoading by vm.intradayLoading.collectAsStateWithLifecycle()
+    val intradaySignal by vm.signal.collectAsStateWithLifecycle()
 
     val notifLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -289,14 +295,10 @@ fun StockApp() {
                         )
                     }
                     item {
-                        if (predStock != null) {
+                        if (predStock != null && acc != null) {
                             PredictionCard(
                                 ui = predUi,
-                                onPredict = {
-                                    requestNotifPermissionIfNeeded()
-                                    predVm.predict(predStock, hasPosition = acc.totalQty > 0)
-                                },
-                                onDetail = { showPredDetail = true }
+                                onRefresh = { predVm.refresh(acc.stock, acc.prevClose, acc.totalQty > 0) }
                             )
                         }
                     }
@@ -339,25 +341,6 @@ fun StockApp() {
         )
     }
 
-    if (showPredDetail) {
-        PredictionDetailDialog(
-            ui = predUi,
-            onDismiss = { showPredDetail = false },
-            onConfigSector = { showPredDetail = false; showSectorPicker = true }
-        )
-    }
-
-    if (showSectorPicker && predStock != null) {
-        SectorPickerDialog(
-            currentIndustry = predUi.stock?.let { predStore.getUserSector(it.marketCode) },
-            onSelect = { ind ->
-                predVm.setSector(predStock, ind)
-                showSectorPicker = false
-            },
-            onDismiss = { showSectorPicker = false }
-        )
-    }
-
     deleteTarget?.let { (idx, name) ->
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
@@ -377,10 +360,7 @@ fun StockApp() {
         OverviewDialog(
             accounts = state.accounts,
             predUi = predUi,
-            onPredictAll = {
-                requestNotifPermissionIfNeeded()
-                predVm.predictAll(state.accounts)
-            },
+            onRefreshSignals = { predVm.refreshAll(state.accounts) },
             onDismiss = { showOverview = false }
         )
     }
@@ -467,6 +447,7 @@ fun StockApp() {
         IntradayDialog(
             points = intraday,
             loading = intradayLoading,
+            signal = intradaySignal,
             prevClose = acc.prevClose,
             stockName = acc.stock.name,
             buys = todayBuys,
@@ -615,8 +596,7 @@ private fun AddStockDialog(
 @Composable
 private fun PredictionCard(
     ui: PredictionViewModel.UiState,
-    onPredict: () -> Unit,
-    onDetail: () -> Unit
+    onRefresh: () -> Unit
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -626,51 +606,26 @@ private fun PredictionCard(
             val stock = ui.stock
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "竞价预测 · ${stock?.name ?: ""}",
+                    "盘中实时预测 · ${stock?.name ?: ""}",
                     fontWeight = FontWeight.Bold, fontSize = 13.sp,
                     modifier = Modifier.weight(1f)
                 )
                 if (stock != null && !PredictionEngine.isPredictable(stock)) {
-                    HintText("无集合竞价")
-                } else if (ui.running) {
-                    HintText("预测中…")
+                    HintText("不支持")
                 } else {
                     Button(
-                        onClick = onPredict,
+                        onClick = onRefresh,
                         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 2.dp)
-                    ) { Text("预测", fontSize = 12.sp) }
+                    ) { Text("刷新", fontSize = 12.sp) }
                 }
             }
-            val result = ui.result
             when {
                 stock != null && !PredictionEngine.isPredictable(stock) -> {
-                    HintText("港股/美股无 A 股式集合竞价，不支持竞价预测")
+                    HintText("港股/美股无 A 股分时口径，不支持盘中预测")
                 }
-                ui.inObservationPhase -> {
-                    val obs = ui.observation
-                    if (obs?.intentMovePct != null && obs.intentVolSurge != null) {
-                        HintText("观察区：量价变化 ${signedPct(obs.intentMovePct)} · 量能×${String.format("%.1f", 1 + obs.intentVolSurge)}，9:20 后可预测")
-                    } else {
-                        HintText("观察区（9:15–9:20 可撤单），9:20 后给出预测")
-                    }
-                }
+                ui.signal != null -> SignalBanner(ui.signal)
                 ui.error != null -> HintText(ui.error)
-                result != null -> {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "${result.conclusion.label} · 评分 ${signedPct(result.score)} · 置信 ${result.confidence}",
-                            color = when (result.conclusion) {
-                                PredictionOutcome.UP -> UpColor
-                                PredictionOutcome.DOWN -> DownColor
-                                else -> MaterialTheme.colorScheme.onSurface
-                            },
-                            fontWeight = FontWeight.Bold, fontSize = 13.sp,
-                            modifier = Modifier.weight(1f)
-                        )
-                        TextButton(onClick = onDetail) { Text("详情", fontSize = 12.sp) }
-                    }
-                }
-                else -> HintText("9:20 后点击预测")
+                else -> HintText("信号计算中…")
             }
         }
     }
@@ -679,124 +634,6 @@ private fun PredictionCard(
 @Composable
 private fun signedPct(v: Double): String =
     String.format(if (v >= 0) "+%.1f%%" else "%.1f%%", v)
-
-// ---------------- 竞价预测详情弹窗 ----------------
-@Composable
-private fun PredictionDetailDialog(
-    ui: PredictionViewModel.UiState,
-    onDismiss: () -> Unit,
-    onConfigSector: () -> Unit
-) {
-    val result = ui.result
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("竞价预测详情") },
-        text = {
-            LazyColumn(Modifier.heightIn(max = 420.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                if (result == null) {
-                    item { EmptyText(ui.error ?: "暂无预测结果") }
-                } else {
-                    item { DetailRow("结论", "${result.conclusion.label}（评分 ${signedPct(result.score)}）") }
-                    item { DetailRow("置信", result.confidence) }
-                    item { DetailRow("分档阈值", String.format("%.1f", result.weights.threshold)) }
-                    item { DetailRow("封顶", result.capApplied?.let { "已封顶 ±$it" } ?: "未触发") }
-                    item { HorizontalDivider() }
-                    item { DetailRow("159915 高开", result.factors.targetGapPct?.let { signedPct(it) } ?: "—") }
-                    item { DetailRow("创业板指", result.factors.indexGapPct?.let { signedPct(it) } ?: "—") }
-                    item { DetailRow("权重股均值", result.factors.sectorAvgGap?.let { signedPct(it) } ?: "—") }
-                    item { DetailRow("板块广度", result.factors.sectorBreadth?.let { String.format("%.2f", it) } ?: "—") }
-                    item { DetailRow("隔夜美股", result.factors.externalAvg?.let { signedPct(it) } ?: "—") }
-                    item { DetailRow("竞价末端上移", result.factors.endMovePct?.let { signedPct(it) } ?: "无基准快照") }
-                    item { DetailRow("放量 z-score", result.factors.volZ?.let { String.format("%.2f", it) } ?: "数据积累中") }
-                    item { DetailRow("5日动量", result.factors.momentum5dPct?.let { signedPct(it) } ?: "数据积累中") }
-                    item {
-                        DetailRow(
-                            "连阳/连阴",
-                            result.factors.upStreak?.let { if (it > 0) "连涨 $it 天" else "连跌 ${-it} 天" } ?: "—"
-                        )
-                    }
-                    item { DetailRow("昨收偏差(20日线)", result.factors.trendDevPct?.let { signedPct(it) } ?: "—") }
-                    if (result.insufficient.isNotEmpty()) {
-                        item { Text(result.insufficient.joinToString("；"), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)) }
-                    }
-                    item { HorizontalDivider() }
-                    item { DetailRow("板块联动", ui.sectorDetail) }
-                    item {
-                        TextButton(
-                            onClick = onConfigSector,
-                            modifier = Modifier.fillMaxWidth()
-                        ) { Text("配置行业联动名单", fontSize = 12.sp) }
-                    }
-                    item { HorizontalDivider() }
-                    item { DetailRow("建议", result.suggestion) }
-                    item { Text(result.disclaimer, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)) }
-                    item { HorizontalDivider() }
-                    item { Text("前推回测命中率（预测方向正确率，不含平盘）", fontWeight = FontWeight.Bold, fontSize = 12.sp) }
-                    TargetType.entries.forEach { t ->
-                        val s = ui.stats[t]
-                        if (s != null) {
-                            item {
-                                DetailRow(
-                                    t.label,
-                                    if (s.directionalTotal == 0) "数据积累中"
-                                    else String.format("%.0f%%（%d/%d）", s.hitRate * 100, s.directionalHit, s.directionalTotal)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
-    )
-}
-
-@Composable
-private fun DetailRow(label: String, value: String) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
-        Text(value, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-    }
-}
-
-// ---------------- 行业联动配置弹窗 ----------------
-@Composable
-private fun SectorPickerDialog(
-    currentIndustry: String?,
-    onSelect: (String?) -> Unit,
-    onDismiss: () -> Unit
-) {
-    val industries = TencentMarketDataApi.INDUSTRY_SECTOR_LISTS.keys.toList()
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("配置行业联动名单") },
-        text = {
-            Column {
-                HintText("自动推荐会在积累 ≥10 天行情后生效；选择行业可立即使用内置龙头名单：")
-                Spacer(Modifier.height(6.dp))
-                LazyColumn(Modifier.heightIn(max = 320.dp)) {
-                    items(industries) { ind ->
-                        TextButton(
-                            onClick = { onSelect(ind) },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(
-                                ind + if (ind == currentIndustry) "（当前）" else "",
-                                fontSize = 14.sp,
-                                color = if (ind == currentIndustry) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { onSelect(null) }) { Text("恢复自动推荐") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-    )
-}
 
 // ---------------- 账户总盈亏条（点击一键刷新全部行情） ----------------
 @Composable
@@ -1228,6 +1065,7 @@ private fun ClearDialog(onClearSelected: () -> Unit, onClearAll: () -> Unit, onD
 private fun IntradayDialog(
     points: List<MinutePoint>?,
     loading: Boolean,
+    signal: IntradaySignal?,
     prevClose: Double?,
     stockName: String,
     buys: List<Pair<Int, Double>>,
@@ -1246,14 +1084,56 @@ private fun IntradayDialog(
         onDismissRequest = onDismiss,
         title = { Text("$stockName 分时") },
         text = {
-            when {
-                loading && points == null -> HintText("分时加载中…")
-                points == null -> HintText("分时数据获取失败，请检查网络")
-                else -> IntradayChart(points, prevClose, buys, sells)
+            Column {
+                signal?.let { SignalBanner(it) }
+                when {
+                    loading && points == null -> HintText("分时加载中…")
+                    points == null -> HintText("分时数据获取失败，请检查网络")
+                    else -> IntradayChart(points, prevClose, buys, sells)
+                }
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
     )
+}
+
+/** 盘中择时信号横幅（等级 + 分数 + 原因；降级提示灰显） */
+@Composable
+private fun SignalBanner(signal: IntradaySignal) {
+    val actionColor = when (signal.action) {
+        IntradayAction.BUY -> UpColor
+        IntradayAction.SELL -> DownColor
+        IntradayAction.HOLD -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+    }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(bottom = 8.dp)
+            .background(actionColor.copy(alpha = 0.08f), RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "${signal.action.label} ${String.format("%+.1f", signal.score)}",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = actionColor
+            )
+            if (signal.degraded) {
+                Spacer(Modifier.width(8.dp))
+                Text("信号降级", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+            }
+        }
+        signal.reasons.forEach { reason ->
+            Text(
+                text = "· $reason",
+                fontSize = 11.sp,
+                lineHeight = 15.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+            )
+        }
+    }
 }
 
 /** 分时图：价格线 + 均价线 + 昨收虚线 + 今日买卖点标记 + 时间刻度（红涨绿跌） */
@@ -1348,16 +1228,16 @@ private fun IntradayChart(points: List<MinutePoint>, prevClose: Double?, buys: L
     }
 }
 
-// ---------------- 账户总览（并列标签：浮盈/市值/已实现/预测） ----------------
+// ---------------- 账户总览（并列标签：浮盈/市值/已实现/盘中信号） ----------------
 @Composable
 private fun OverviewDialog(
     accounts: List<StockAccount>,
     predUi: PredictionViewModel.UiState,
-    onPredictAll: () -> Unit,
+    onRefreshSignals: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val dataTabs = OverviewTab.entries.toList()
-    val tabLabels = dataTabs.map { it.label } + "预测"
+    val tabLabels = dataTabs.map { it.label } + "盘中信号"
     var selected by remember { mutableStateOf(0) }
     val isPredict = selected >= dataTabs.size
     val dataTab = if (!isPredict) dataTabs[selected] else null
@@ -1367,9 +1247,15 @@ private fun OverviewDialog(
         else overviewEntries(accounts, dataTab).sortedByDescending { kotlin.math.abs(it.value) }
     }
     val total = entries.sumOf { kotlin.math.abs(it.value) }
-    // 进入"预测"标签自动触发一次预测
+    // 进入"盘中信号"标签自动刷新一次，停留期间每 30 秒自动刷新
     LaunchedEffect(isPredict) {
-        if (isPredict) onPredictAll()
+        if (isPredict) {
+            onRefreshSignals()
+            while (true) {
+                delay(30_000)
+                onRefreshSignals()
+            }
+        }
     }
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -1390,14 +1276,20 @@ private fun OverviewDialog(
                     tabLabels.forEachIndexed { i, label ->
                         SegmentedButton(
                             selected = selected == i,
-                            onClick = { selected = i },
-                            shape = SegmentedButtonDefaults.itemShape(index = i, count = tabLabels.size)
+                            // 每次点击"盘中信号"标签都立即刷新一次，不必等 30 秒自动刷新
+                            onClick = {
+                                selected = i
+                                if (i >= dataTabs.size) onRefreshSignals()
+                            },
+                            shape = SegmentedButtonDefaults.itemShape(index = i, count = tabLabels.size),
+                            // 去掉选中勾，避免 4 个标签文字被挤出
+                            icon = {}
                         ) { Text(label, fontSize = 12.sp) }
                     }
                 }
                 Spacer(Modifier.height(6.dp))
                 if (isPredict) {
-                    PredictionPanel(predUi, onPredictAll)
+                    PredictionPanel(predUi, onRefreshSignals)
                 } else if (accounts.isEmpty()) {
                     EmptyText("暂无股票数据")
                 } else {
@@ -1415,33 +1307,61 @@ private fun OverviewDialog(
 }
 
 @Composable
-private fun PredictionPanel(predUi: PredictionViewModel.UiState, onPredictAll: () -> Unit) {
+private fun PredictionPanel(predUi: PredictionViewModel.UiState, onRefresh: () -> Unit) {
     Column {
-        Button(
-            onClick = onPredictAll,
-            enabled = !predUi.running,
-            modifier = Modifier.fillMaxWidth()
-        ) { Text(if (predUi.running) "预测中…" else "一键预测全部 A 股", fontSize = 13.sp) }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "盘中信号",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                modifier = Modifier.weight(1f)
+            )
+            if (predUi.running) HintText("刷新中…")
+            Spacer(Modifier.width(4.dp))
+            TextButton(onClick = onRefresh) { Text("刷新", fontSize = 12.sp) }
+        }
         Spacer(Modifier.height(8.dp))
-        if (predUi.allResults.isEmpty()) {
-            HintText(predUi.error ?: "9:20 后点击获取全部持仓的竞价预测")
+        if (predUi.allSignals.isEmpty()) {
+            HintText(predUi.error ?: "加载持仓盘中信号…")
         } else {
             LazyColumn(Modifier.heightIn(max = 360.dp)) {
-                items(predUi.allResults) { r ->
+                items(predUi.allSignals) { row ->
+                    val sig = row.signal
                     Row(
                         Modifier.fillMaxWidth().padding(vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(r.stockName, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
                         Text(
-                            "${r.conclusion.label} ${signedPct(r.score)} · 置信${r.confidence}",
-                            fontSize = 13.sp, fontWeight = FontWeight.Bold,
-                            color = when (r.conclusion) {
-                                PredictionOutcome.UP -> UpColor
-                                PredictionOutcome.DOWN -> DownColor
-                                else -> MaterialTheme.colorScheme.onSurface
-                            }
+                            row.stock.name,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.weight(1f)
                         )
+                        if (sig == null) {
+                            HintText("获取失败")
+                        } else {
+                            Text(
+                                "${sig.action.label} ${String.format("%+.1f", sig.score)}",
+                                fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                                color = when (sig.action) {
+                                    IntradayAction.BUY -> UpColor
+                                    IntradayAction.SELL -> DownColor
+                                    IntradayAction.HOLD -> MaterialTheme.colorScheme.primary
+                                    else -> MaterialTheme.colorScheme.onSurface
+                                }
+                            )
+                        }
+                    }
+                    val shown = sig?.reasons?.take(2).orEmpty()
+                    if (shown.isNotEmpty()) {
+                        Row(Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
+                            Text(
+                                shown.joinToString(" · "),
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+                                modifier = Modifier.padding(start = 0.dp)
+                            )
+                        }
                     }
                     HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
                 }
