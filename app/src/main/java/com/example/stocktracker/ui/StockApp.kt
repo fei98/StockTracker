@@ -1185,8 +1185,8 @@ private fun IntradayChart(points: List<MinutePoint>, prevClose: Double?, buys: L
             fun x(minute: Int): Float = minute.toFloat() / n * w
             fun y(price: Double): Float = padTop + ((maxP - price) / range * chartH).toFloat()
 
-            // 竖向网格线（9:30 / 10:30 / 11:30 / 14:00 / 15:00）
-            listOf(0, 60, 120, 210, 240).forEach { m ->
+            // 竖向网格线（9:30 / 10:30 / 11:30 / 14:00 / 15:00，午休压缩）
+            listOf(0, 60, 120, 180, 240).forEach { m ->
                 drawLine(
                     color = gridColor,
                     start = Offset(x(m), padTop),

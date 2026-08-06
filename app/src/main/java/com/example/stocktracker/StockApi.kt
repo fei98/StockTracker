@@ -146,12 +146,12 @@ fun parseMinuteData(raw: String): List<MinutePoint>? {
     return points.takeIf { it.isNotEmpty() }
 }
 
-/** "0930" → 分钟索引（0 = 9:30）；"1130" → 120；午休后 "1300" → 210（跳过 11:30-13:00 的 90 分钟） */
+/** "0930" → 交易分钟索引（9:30=0；11:30=120；午休压缩：13:00 从 120 继续；15:00=240） */
 fun parseMinuteIndex(hhmm: String): Int? {
     if (hhmm.length != 4) return null
     val h = hhmm.substring(0, 2).toIntOrNull() ?: return null
     val m = hhmm.substring(2, 4).toIntOrNull() ?: return null
     if (h < 9 || h > 15) return null
-    val idx = (h - 9) * 60 + m - 30
-    return if (idx >= 0) idx else null
+    val idx = if (h <= 11) (h - 9) * 60 + m - 30 else 120 + (h - 13) * 60 + m
+    return if (idx in 0..240) idx else null
 }

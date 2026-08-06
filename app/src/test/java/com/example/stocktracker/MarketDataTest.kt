@@ -160,7 +160,7 @@ class SectorMapTest {
         assertEquals(0, pts[0].minute)          // 9:30 → 0
         assertEquals(1, pts[1].minute)          // 9:31 → 1
         assertEquals(120, pts[2].minute)        // 11:30 → 120
-        assertEquals(210, pts[3].minute)        // 13:00 → 210（跳过午休）
+        assertEquals(120, pts[3].minute)        // 13:00 → 120（午休压缩，从 120 继续）
         assertEquals(3.497, pts[0].price, 0.0001)
         // 均价 = 累计额 /（累计量手 × 100）
         assertEquals(500.0 / (100 * 100.0), pts[0].avgPrice, 0.0001)
@@ -192,8 +192,9 @@ class SectorMapTest {
         }.timeInMillis
         assertEquals(0, minuteIndexOf(at(9, 30)))
         assertEquals(30, minuteIndexOf(at(10, 0)))
-        assertEquals(210, minuteIndexOf(at(13, 0)))
-        assertEquals(239, minuteIndexOf(at(15, 0)))      // 收盘收敛
+        assertEquals(120, minuteIndexOf(at(13, 0)))     // 午休压缩
+        assertEquals(180, minuteIndexOf(at(14, 0)))
+        assertEquals(240, minuteIndexOf(at(15, 0)))     // 收盘收敛
         assertEquals(0, minuteIndexOf(at(8, 0)))         // 开盘前收敛
     }
 

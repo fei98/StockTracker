@@ -199,8 +199,10 @@ data class MinutePoint(
 /** 交易时间戳 → 分时分钟索引（0=9:30，午休跳过，越界收敛到 [0,239]） */
 fun minuteIndexOf(time: Long): Int {
     val cal = Calendar.getInstance().apply { timeInMillis = time }
-    val idx = (cal.get(Calendar.HOUR_OF_DAY) - 9) * 60 + cal.get(Calendar.MINUTE) - 30
-    return idx.coerceIn(0, 239)
+    val h = cal.get(Calendar.HOUR_OF_DAY)
+    val m = cal.get(Calendar.MINUTE)
+    val idx = if (h <= 11) (h - 9) * 60 + m - 30 else 120 + (h - 13) * 60 + m
+    return idx.coerceIn(0, 240)
 }
 
 data class StockState(
