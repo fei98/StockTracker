@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -31,11 +33,18 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PieChart
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -51,6 +60,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -114,6 +125,7 @@ import com.example.stocktracker.QuoteResult
 import com.example.stocktracker.PrefsStorage
 import com.example.stocktracker.R
 import com.example.stocktracker.SettingsStore
+import com.example.stocktracker.Stock
 import com.example.stocktracker.StockAccount
 import com.example.stocktracker.StockApi
 import com.example.stocktracker.StockState
@@ -189,9 +201,6 @@ fun StockApp(
     var showTradeDialog by remember { mutableStateOf(false) }
     var showPriceDialog by remember { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<Pair<Int, String>?>(null) }
-    var showOverview by remember { mutableStateOf(false) }
-    var showNotifications by remember { mutableStateOf(false) }
-    var showSettings by remember { mutableStateOf(false) }
     var showFeeSettings by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
     var showDonate by remember { mutableStateOf(false) }
@@ -202,6 +211,13 @@ fun StockApp(
     val intraday by vm.intraday.collectAsStateWithLifecycle()
     val intradayLoading by vm.intradayLoading.collectAsStateWithLifecycle()
     val intradaySignal by vm.signal.collectAsStateWithLifecycle()
+    var selectedTab by remember { mutableStateOf(0) } // 0 首页 / 1 总览 / 2 我的
+    var minePage by remember { mutableStateOf(MinePage.MENU) }
+    // 统一返回契约（覆盖整个 App 的所有"非根"层）：
+    // 1. 先让位于具体界面自身的 BackHandler（如"我的"子页，逐级返回）；
+    // 2. 未被那些界面接管时，这里兜底：总览/我的 tab 按返回回到首页 tab；首页 tab 才交给系统退出。
+    // 后续新增"有上级/可返回"的界面时，在该界面内注册自己的 BackHandler 即可被本契约优先接管。
+    BackHandler(enabled = selectedTab != 0) { selectedTab = 0 }
 
     val notifLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -237,113 +253,108 @@ fun StockApp(
             snackbarHost = { SnackbarHost(snackbar) },
             topBar = {
                 TopAppBar(
-                    title = { Text("炒股记账本", fontWeight = FontWeight.Bold) },
+                    title = {
+                        Text(
+                            when (selectedTab) {
+                                0 -> "炒股记账本"
+                                1 -> "账户总览"
+                                else -> "我的"
+                            },
+                            fontWeight = FontWeight.Bold
+                        )
+                    },
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = MaterialTheme.colorScheme.primary,
                         titleContentColor = MaterialTheme.colorScheme.onPrimary
                     ),
                     actions = {
-                        IconButton(onClick = { showNotifications = true }) {
-                            Icon(
-                                Icons.Default.Notifications,
-                                contentDescription = "通知历史",
-                                tint = MaterialTheme.colorScheme.onPrimary
-                            )
-                        }
-                        IconButton(onClick = { showOverview = true }) {
-                            Icon(
-                                Icons.Default.PieChart,
-                                contentDescription = "账户总览",
-                                tint = MaterialTheme.colorScheme.onPrimary
-                            )
-                        }
-                        IconButton(onClick = { showSettings = true }) {
-                            Icon(
-                                Icons.Default.Settings,
-                                contentDescription = "设置",
-                                tint = MaterialTheme.colorScheme.onPrimary
-                            )
+                        if (selectedTab == 2) {
+                            IconButton(onClick = { minePage = MinePage.NOTIFICATIONS }) {
+                                Icon(
+                                    Icons.Default.Notifications,
+                                    contentDescription = "通知历史",
+                                    tint = MaterialTheme.colorScheme.onPrimary
+                                )
+                            }
                         }
                     }
                 )
+            },
+            bottomBar = {
+                NavigationBar(
+                    modifier = Modifier.height(64.dp),
+                    windowInsets = WindowInsets(0, 0, 0, 0)
+                ) {
+                    NavigationBarItem(
+                        selected = selectedTab == 0,
+                        onClick = { selectedTab = 0 },
+                        icon = { Icon(Icons.Default.Home, contentDescription = "首页", modifier = Modifier.size(22.dp)) },
+                        label = { Text("首页", fontSize = 11.sp) },
+                        alwaysShowLabel = true
+                    )
+                    NavigationBarItem(
+                        selected = selectedTab == 1,
+                        onClick = { selectedTab = 1 },
+                        icon = { Icon(Icons.Default.PieChart, contentDescription = "总览", modifier = Modifier.size(22.dp)) },
+                        label = { Text("总览", fontSize = 11.sp) },
+                        alwaysShowLabel = true
+                    )
+                    NavigationBarItem(
+                        selected = selectedTab == 2,
+                        onClick = { selectedTab = 2 },
+                        icon = { Icon(Icons.Default.Person, contentDescription = "我的", modifier = Modifier.size(22.dp)) },
+                        label = { Text("我的", fontSize = 11.sp) },
+                        alwaysShowLabel = true
+                    )
+                }
             }
         ) { padding ->
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding)
-                    .padding(horizontal = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = PaddingValues(vertical = 8.dp)
-            ) {
-                if (state.accounts.isEmpty()) {
-                    item {
-                        OutlinedButton(
-                            onClick = { showAddDialog = true },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(Icons.Default.Add, contentDescription = null)
-                            Spacer(Modifier.width(6.dp))
-                            Text("添加股票（输入代码自动查询名称）")
-                        }
-                    }
-                } else {
-                    item { AccountPnlBar(state, onRefreshAll = vm::refreshAll) }
-                    item {
-                        StockBar(
-                            accounts = state.accounts,
-                            selectedIndex = state.selectedIndex,
-                            onSelect = vm::selectStock,
-                            onAddClick = { showAddDialog = true },
-                            onDelete = { i ->
-                                val n = state.accounts.getOrNull(i)?.stock?.name ?: return@StockBar
-                                deleteTarget = i to n
-                            }
-                        )
-                    }
-                }
-                if (acc == null) {
-                    // 无选中股票时只有添加按钮，无需其他提示
-                } else {
-                    item {
-                        SummaryCard(
-                            acc,
-                            onEditPrice = { showPriceDialog = true },
-                            onRefresh = vm::refreshPrice,
-                            onIntraday = {
-                                vm.loadIntraday()
-                                showIntradayDialog = true
-                            }
-                        )
-                    }
-                    item {
-                        if (predStock != null && acc != null) {
-                            PredictionCard(
-                                ui = predUi,
-                                onRefresh = {
-                                    predVm.refresh(acc.stock, acc.prevClose, acc.totalQty > 0, acc.sellableQty > 0)
-                                }
-                            )
-                        }
-                    }
-                    item { HoldingsCard(acc) }
-                    item { HistoryPreviewCard(acc.trades) }
-                    item {
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Button(
-                                onClick = { showTradeDialog = true },
-                                modifier = Modifier.weight(1f)
-                            ) { Text("交易", fontWeight = FontWeight.Bold) }
-                            OutlinedButton(
-                                onClick = { showClearDialog = true },
-                                modifier = Modifier.weight(1f)
-                            ) { Text("清空") }
-                        }
-                    }
-                }
+            when (selectedTab) {
+                1 -> OverviewScreen(
+                    padding = padding,
+                    accounts = state.accounts,
+                    predUi = predUi,
+                    onRefreshSignals = { predVm.refreshAll(state.accounts) },
+                    onRefreshData = { vm.refreshAll() }
+                )
+                2 -> MineScreen(
+                    padding = padding,
+                    page = minePage,
+                    onPageChange = { minePage = it },
+                    notifLogStore = notifLogStore,
+                    themePref = themePref,
+                    onThemeChange = {
+                        themePref = it
+                        settingsStore.saveTheme(it)
+                    },
+                    onOpenFee = { showFeeSettings = true },
+                    onOpenAbout = { showAbout = true }
+                )
+                else -> HomeScreen(
+                    padding = padding,
+                    state = state,
+                    acc = acc,
+                    predStock = predStock,
+                    predUi = predUi,
+                    onSelect = vm::selectStock,
+                    onAdd = { showAddDialog = true },
+                    onDelete = { i ->
+                        val n = state.accounts.getOrNull(i)?.stock?.name ?: return@HomeScreen
+                        deleteTarget = i to n
+                    },
+                    onRefreshAll = vm::refreshAll,
+                    onEditPrice = { showPriceDialog = true },
+                    onRefreshPrice = vm::refreshPrice,
+                    onIntraday = {
+                        vm.loadIntraday()
+                        showIntradayDialog = true
+                    },
+                    onRefreshSignal = {
+                        acc?.let { predVm.refresh(it.stock, it.prevClose, it.totalQty > 0, it.sellableQty > 0) }
+                    },
+                    onTrade = { showTradeDialog = true },
+                    onClear = { showClearDialog = true }
+                )
             }
         }
     }
@@ -383,38 +394,8 @@ fun StockApp(
         )
     }
 
-    if (showNotifications) {
-        NotificationLogDialog(
-            store = notifLogStore,
-            onDismiss = { showNotifications = false }
-        )
-    }
-
     pendingDetail?.let { d ->
         NotificationDetailDialog(detail = d, onDismiss = onConsumeDetail)
-    }
-
-    if (showOverview) {
-        OverviewDialog(
-            accounts = state.accounts,
-            predUi = predUi,
-            onRefreshSignals = { predVm.refreshAll(state.accounts) },
-            onRefreshData = { vm.refreshAll() },
-            onDismiss = { showOverview = false }
-        )
-    }
-
-    if (showSettings) {
-        SettingsDialog(
-            themePref = themePref,
-            onThemeChange = {
-                themePref = it
-                settingsStore.saveTheme(it)
-            },
-            onOpenFee = { showFeeSettings = true },
-            onOpenAbout = { showAbout = true },
-            onDismiss = { showSettings = false }
-        )
     }
 
     if (showFeeSettings) {
@@ -1289,12 +1270,251 @@ private fun IntradayChart(points: List<MinutePoint>, prevClose: Double?, buys: L
 
 // ---------------- 账户总览（并列标签：浮盈/市值/已实现/盘中信号） ----------------
 @Composable
-private fun OverviewDialog(
+private fun HomeScreen(
+    padding: PaddingValues,
+    state: StockState,
+    acc: StockAccount?,
+    predStock: Stock?,
+    predUi: PredictionViewModel.UiState,
+    onSelect: (Int) -> Unit,
+    onAdd: () -> Unit,
+    onDelete: (Int) -> Unit,
+    onRefreshAll: () -> Unit,
+    onEditPrice: () -> Unit,
+    onRefreshPrice: () -> Unit,
+    onIntraday: () -> Unit,
+    onRefreshSignal: () -> Unit,
+    onTrade: () -> Unit,
+    onClear: () -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(padding)
+            .padding(horizontal = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        contentPadding = PaddingValues(vertical = 8.dp)
+    ) {
+        if (state.accounts.isEmpty()) {
+            item {
+                OutlinedButton(
+                    onClick = onAdd,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("添加股票（输入代码自动查询名称）")
+                }
+            }
+        } else {
+            item { AccountPnlBar(state, onRefreshAll = onRefreshAll) }
+            item {
+                StockBar(
+                    accounts = state.accounts,
+                    selectedIndex = state.selectedIndex,
+                    onSelect = onSelect,
+                    onAddClick = onAdd,
+                    onDelete = onDelete
+                )
+            }
+        }
+        if (acc == null) {
+            // 无选中股票时只有添加按钮，无需其他提示
+        } else {
+            item {
+                SummaryCard(
+                    acc,
+                    onEditPrice = onEditPrice,
+                    onRefresh = onRefreshPrice,
+                    onIntraday = onIntraday
+                )
+            }
+            item {
+                if (predStock != null && acc != null) {
+                    PredictionCard(ui = predUi, onRefresh = onRefreshSignal)
+                }
+            }
+            item { HoldingsCard(acc) }
+            item { HistoryPreviewCard(acc.trades) }
+            item {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = onTrade,
+                        modifier = Modifier.weight(1f)
+                    ) { Text("交易", fontWeight = FontWeight.Bold) }
+                    OutlinedButton(
+                        onClick = onClear,
+                        modifier = Modifier.weight(1f)
+                    ) { Text("清空") }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MineScreen(
+    padding: PaddingValues,
+    page: MinePage,
+    onPageChange: (MinePage) -> Unit,
+    notifLogStore: NotificationLogStore,
+    themePref: ThemePreference,
+    onThemeChange: (ThemePreference) -> Unit,
+    onOpenFee: () -> Unit,
+    onOpenAbout: () -> Unit
+) {
+    val themeOptions = listOf(
+        ThemePreference.SYSTEM to "跟随系统",
+        ThemePreference.LIGHT to "亮色",
+        ThemePreference.DARK to "暗色"
+    )
+    // 系统返回手势：在子页面时逐级返回，根菜单时退出 App
+    BackHandler(enabled = page != MinePage.MENU) {
+        onPageChange(
+            when (page) {
+                MinePage.SETTINGS, MinePage.NOTIFICATIONS -> MinePage.MENU
+                MinePage.APPEARANCE -> MinePage.SETTINGS
+                MinePage.MENU -> MinePage.MENU
+            }
+        )
+    }
+    when (page) {
+        MinePage.MENU -> MineMenu(
+            padding = padding,
+            onOpenNotifications = { onPageChange(MinePage.NOTIFICATIONS) },
+            onOpenSettings = { onPageChange(MinePage.SETTINGS) },
+            onOpenAbout = onOpenAbout
+        )
+        MinePage.NOTIFICATIONS -> MineSubPage(padding, "通知历史", onBack = { onPageChange(MinePage.MENU) }) {
+            NotificationLogContent(notifLogStore)
+        }
+        MinePage.SETTINGS -> MineSubPage(
+            padding, "设置",
+            onBack = { onPageChange(MinePage.MENU) }
+        ) {
+            SettingRow("外观", "主题 / 配色", onClick = { onPageChange(MinePage.APPEARANCE) })
+            HorizontalDivider()
+            SettingRow("费率设置", "佣金 / 印花税 / 过户费", onClick = onOpenFee)
+        }
+        MinePage.APPEARANCE -> MineSubPage(
+            padding, "外观",
+            onBack = { onPageChange(MinePage.SETTINGS) }
+        ) {
+            Text("主题", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            Spacer(Modifier.height(6.dp))
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                themeOptions.forEachIndexed { i, (pref, label) ->
+                    SegmentedButton(
+                        selected = themePref == pref,
+                        onClick = { onThemeChange(pref) },
+                        shape = SegmentedButtonDefaults.itemShape(index = i, count = themeOptions.size)
+                    ) { Text(label, fontSize = 12.sp) }
+                }
+            }
+        }
+    }
+}
+
+private enum class MinePage { MENU, NOTIFICATIONS, SETTINGS, APPEARANCE }
+
+@Composable
+private fun MineMenu(
+    padding: PaddingValues,
+    onOpenNotifications: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onOpenAbout: () -> Unit
+) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .padding(padding)
+            .padding(horizontal = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        SectionCard("我的") {
+            SettingRow("设置", "外观 / 费率", onClick = onOpenSettings, icon = { Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary) })
+        }
+        // 关于永远排在最底部，后续新增条目都插在它上方
+        SectionCard("") {
+            SettingRow("关于", "版本 / 检查更新 / 开源", onClick = onOpenAbout, icon = { Icon(Icons.Default.Info, contentDescription = null, modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary) })
+        }
+    }
+}
+
+@Composable
+private fun MineSubPage(
+    padding: PaddingValues,
+    title: String,
+    onBack: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .padding(padding)
+            .padding(horizontal = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.Default.ArrowBack, contentDescription = "返回")
+            }
+            Text(title, fontWeight = FontWeight.Bold, fontSize = 17.sp, modifier = Modifier.weight(1f))
+        }
+        Column(Modifier.verticalScroll(rememberScrollState())) {
+            SectionCard("") { content() }
+        }
+    }
+}
+
+@Composable
+private fun NotificationLogContent(store: NotificationLogStore) {
+    var entries by remember { mutableStateOf(store.load()) }
+    var showClearConfirm by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text("共 ${entries.size} 条", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+        Spacer(Modifier.weight(1f))
+        TextButton(
+            onClick = { showClearConfirm = true },
+            enabled = entries.isNotEmpty()
+        ) { Text("清空", fontSize = 12.sp, color = MaterialTheme.colorScheme.error) }
+    }
+    if (entries.isEmpty()) {
+        EmptyText("暂无通知记录")
+    } else {
+        entries.forEach { n ->
+            NotificationRow(n)
+            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+        }
+    }
+    if (showClearConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearConfirm = false },
+            title = { Text("清空通知") },
+            text = { Text("确定要清空全部 ${entries.size} 条通知历史吗？此操作不可恢复。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    store.clear()
+                    entries = emptyList()
+                    showClearConfirm = false
+                }) { Text("清空", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { showClearConfirm = false }) { Text("取消") } }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun OverviewScreen(
+    padding: PaddingValues,
     accounts: List<StockAccount>,
     predUi: PredictionViewModel.UiState,
     onRefreshSignals: () -> Unit,
-    onRefreshData: () -> Unit,
-    onDismiss: () -> Unit
+    onRefreshData: () -> Unit
 ) {
     val dataTabs = OverviewTab.entries.toList()
     val tabLabels = dataTabs.map { it.label } + "盘中信号"
@@ -1319,65 +1539,104 @@ private fun OverviewDialog(
             }
         }
     }
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            shape = RoundedCornerShape(16.dp),
-            color = MaterialTheme.colorScheme.surface,
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(max = 620.dp)
-        ) {
-            Column(Modifier.padding(16.dp)) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("账户总览", fontWeight = FontWeight.Bold, fontSize = 16.sp, modifier = Modifier.weight(1f))
-                    // 每个标签均配刷新按钮：浮盈/市值/已实现 → 拉取全部现价重算；盘中信号 → 重算信号
-                    TextButton(onClick = {
-                        if (isPredict) {
-                            onRefreshSignals()
-                        } else {
-                            dataRefreshing = true
-                            onRefreshData()
-                            scope.launch { delay(1200); dataRefreshing = false }
-                        }
-                    }) {
-                        Text(
-                            if (isPredict) (if (predUi.running) "刷新中…" else "刷新")
-                            else (if (dataRefreshing) "刷新中…" else "刷新"),
-                            fontSize = 12.sp
-                        )
-                    }
-                    IconButton(onClick = onDismiss) {
-                        Icon(Icons.Default.Close, contentDescription = "关闭")
-                    }
-                }
-                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .padding(padding)
+            .padding(horizontal = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        // 可横向滚动的标签行：标签再多也不会挤爆一排，箭头随位置变化提示可滑方向
+        val tabScroll = rememberScrollState()
+        val canScrollBack = tabScroll.value > 0          // 可向左（已滑离最左）
+        val canScrollFwd = tabScroll.maxValue > tabScroll.value  // 可向右（还没到最右）
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1f)) {
+                Row(
+                    Modifier.horizontalScroll(tabScroll),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     tabLabels.forEachIndexed { i, label ->
-                        SegmentedButton(
-                            selected = selected == i,
-                            // 每次点击"盘中信号"标签都立即刷新一次，不必等 30 秒自动刷新
-                            onClick = {
-                                selected = i
-                                if (i >= dataTabs.size) onRefreshSignals()
-                            },
-                            shape = SegmentedButtonDefaults.itemShape(index = i, count = tabLabels.size),
-                            // 去掉选中勾，避免 4 个标签文字被挤出
-                            icon = {}
-                        ) { Text(label, fontSize = 12.sp) }
-                    }
-                }
-                Spacer(Modifier.height(6.dp))
-                if (isPredict) {
-                    PredictionPanel(predUi, onRefreshSignals)
-                } else if (accounts.isEmpty()) {
-                    EmptyText("暂无股票数据")
-                } else {
-                    DonutChart(entries, dataTab!!, total)
-                    HorizontalDivider()
-                    LazyColumn(Modifier.heightIn(max = 220.dp)) {
-                        items(entries) { e ->
-                            OverviewLegendRow(e, dataTab, total, entries.indexOf(e))
+                        val tabSelected = selected == i
+                        Box(
+                            Modifier
+                                .clickable {
+                                    selected = i
+                                    if (i >= dataTabs.size) onRefreshSignals()
+                                }
+                                .padding(horizontal = 14.dp, vertical = 12.dp)
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    label,
+                                    fontSize = 13.sp,
+                                    fontWeight = if (tabSelected) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (tabSelected) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                )
+                                Spacer(Modifier.height(3.dp))
+                                Box(
+                                    Modifier
+                                        .width(if (tabSelected) 20.dp else 0.dp)
+                                        .height(2.dp)
+                                        .background(MaterialTheme.colorScheme.primary)
+                                )
+                            }
                         }
                     }
+                }
+            }
+            // 根据滚动位置显示方向箭头：左侧有未显示内容→向左，右侧有→向右
+            if (canScrollBack) {
+                Icon(
+                    Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                    contentDescription = "向左滑动查看更多",
+                    tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                    modifier = Modifier.size(18.dp)
+                )
+            } else {
+                Icon(
+                    Icons.Default.KeyboardArrowRight,
+                    contentDescription = "可点击滑动查看更多",
+                    tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                if (isPredict) "盘中信号（每 30 秒自动刷新）"
+                else "${dataTab?.label}（按持仓占比）",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(onClick = {
+                if (isPredict) {
+                    onRefreshSignals()
+                } else {
+                    dataRefreshing = true
+                    onRefreshData()
+                    scope.launch { delay(1200); dataRefreshing = false }
+                }
+            }) {
+                Text(
+                    if (isPredict) (if (predUi.running) "刷新中…" else "刷新")
+                    else (if (dataRefreshing) "刷新中…" else "刷新"),
+                    fontSize = 12.sp
+                )
+            }
+        }
+        if (isPredict) {
+            PredictionPanel(predUi, onRefreshSignals)
+        } else if (accounts.isEmpty()) {
+            EmptyText("暂无股票数据")
+        } else {
+            DonutChart(entries, dataTab!!, total)
+            HorizontalDivider()
+            LazyColumn {
+                items(entries) { e ->
+                    OverviewLegendRow(e, dataTab, total, entries.indexOf(e))
                 }
             }
         }
@@ -1580,66 +1839,7 @@ private fun NotificationDetailDialog(detail: NotificationDetail, onDismiss: () -
     }
 }
 
-// ---------------- 通知历史弹窗（右上角铃铛，竞价预测 + 盘中信号落盘记录） ----------------
-@Composable
-private fun NotificationLogDialog(store: NotificationLogStore, onDismiss: () -> Unit) {
-    var entries by remember { mutableStateOf(store.load()) }
-    var showClearConfirm by remember { mutableStateOf(false) }
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            shape = RoundedCornerShape(16.dp),
-            color = MaterialTheme.colorScheme.surface,
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(max = 620.dp)
-        ) {
-            Column(Modifier.padding(16.dp)) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("通知历史", fontWeight = FontWeight.Bold, fontSize = 16.sp, modifier = Modifier.weight(1f))
-                    IconButton(onClick = onDismiss) {
-                        Icon(Icons.Default.Close, contentDescription = "关闭")
-                    }
-                }
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("共 ${entries.size} 条", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
-                    Spacer(Modifier.weight(1f))
-                    TextButton(
-                        onClick = { showClearConfirm = true },
-                        enabled = entries.isNotEmpty()
-                    ) { Text("清空", fontSize = 12.sp, color = MaterialTheme.colorScheme.error) }
-                }
-                HorizontalDivider()
-                if (entries.isEmpty()) {
-                    Spacer(Modifier.height(24.dp))
-                    EmptyText("暂无通知记录")
-                } else {
-                    LazyColumn(Modifier.heightIn(max = 480.dp)) {
-                        items(entries) { n ->
-                            NotificationRow(n)
-                            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if (showClearConfirm) {
-        AlertDialog(
-            onDismissRequest = { showClearConfirm = false },
-            title = { Text("清空通知") },
-            text = { Text("确定要清空全部 ${entries.size} 条通知历史吗？此操作不可恢复。") },
-            confirmButton = {
-                TextButton(onClick = {
-                    store.clear()
-                    entries = emptyList()
-                    showClearConfirm = false
-                }) { Text("清空", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = { TextButton(onClick = { showClearConfirm = false }) { Text("取消") } }
-        )
-    }
-}
-
+// ---------------- 通知历史表格（"我的"页内嵌） ----------------
 @Composable
 private fun NotificationRow(n: AppNotification) {
     val badgeColor = when (n.kind) {
@@ -1695,46 +1895,7 @@ private fun signatureFingerprintOf(context: android.content.Context): String? = 
 }.getOrNull()
 
 @Composable
-private fun SettingsDialog(
-    themePref: ThemePreference,
-    onThemeChange: (ThemePreference) -> Unit,
-    onOpenFee: () -> Unit,
-    onOpenAbout: () -> Unit,
-    onDismiss: () -> Unit
-) {
-    val themeOptions = listOf(
-        ThemePreference.SYSTEM to "跟随系统",
-        ThemePreference.LIGHT to "亮色",
-        ThemePreference.DARK to "暗色"
-    )
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("设置") },
-        text = {
-            Column {
-                Text("外观", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                Spacer(Modifier.height(6.dp))
-                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                    themeOptions.forEachIndexed { i, (pref, label) ->
-                        SegmentedButton(
-                            selected = themePref == pref,
-                            onClick = { onThemeChange(pref) },
-                            shape = SegmentedButtonDefaults.itemShape(index = i, count = themeOptions.size)
-                        ) { Text(label, fontSize = 12.sp) }
-                    }
-                }
-                Spacer(Modifier.height(10.dp))
-                HorizontalDivider()
-                SettingRow("费率设置", "佣金 / 印花税 / 过户费", onClick = onOpenFee)
-                SettingRow("关于", "版本 / 检查更新 / 开源", onClick = onOpenAbout)
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } }
-    )
-}
-
-@Composable
-private fun SettingRow(label: String, desc: String, onClick: () -> Unit) {
+private fun SettingRow(label: String, desc: String, onClick: () -> Unit, icon: (@Composable () -> Unit)? = null) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -1742,6 +1903,10 @@ private fun SettingRow(label: String, desc: String, onClick: () -> Unit) {
             .padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        if (icon != null) {
+            icon()
+            Spacer(Modifier.width(12.dp))
+        }
         Column(Modifier.weight(1f)) {
             Text(label, fontSize = 14.sp)
             Text(desc, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))

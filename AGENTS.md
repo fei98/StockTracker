@@ -18,7 +18,7 @@ adb install -r app\build\outputs\apk\debug\app-debug.apk
 - 测试在 `app/src/test/java/com/example/stocktracker/`；纯逻辑模块（`IntradaySignal.kt` / `AuctionPredictor.kt` / `Calibration.kt`）应保持纯函数、无 IO，便于单测；时间相关逻辑通过注入 `nowMillis` / `atTime()` 固定时刻，避免依赖运行时间。`ViewModelt`/协程相关测试用 `MainDispatcherRule.kt` 切换主线程调度器。只跑单个用例追加 `-Pandroid.testInstrumentationRunnerArguments.class` 无效，用 JUnit 类名过滤即可，如：`.\gradlew.bat :app:testDebugUnitTest --tests "com.example.stocktracker.AuctionPredictorTest"`。需 JDK 17（`compileOptions` / `kotlinOptions` 均为 17）。
 - 无 CI、无 lint 配置；本地验证 = 全量单测通过 + `assembleDebug` 通过。
 - README 的项目结构已滞后：实际还包含 `NotificationLog.kt`、`IndexMinuteCache.kt`、`IntradaySignalStore.kt`、`Overview.kt`、`FeeConfigStore.kt`、`UpdateChecker.kt`、`SettingsStore.kt`。
-- 版本号在 `app/build.gradle.kts` 的 `defaultConfig`（当前 versionCode 27 / versionName 3.6），改动前先核对。
+- 版本号在 `app/build.gradle.kts` 的 `defaultConfig`（当前 versionCode 28 / versionName 3.7），改动前先核对。
 
 ## 二、安装验证（重要）
 
