@@ -28,8 +28,11 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -38,6 +41,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Home
@@ -54,8 +58,9 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -340,10 +345,6 @@ fun StockApp(
                     predUi = predUi,
                     onSelect = vm::selectStock,
                     onAdd = { showAddDialog = true },
-                    onDelete = { i ->
-                        val n = state.accounts.getOrNull(i)?.stock?.name ?: return@HomeScreen
-                        deleteTarget = i to n
-                    },
                     onRefreshAll = vm::refreshAll,
                     onEditPrice = { showPriceDialog = true },
                     onRefreshPrice = vm::refreshPrice,
@@ -483,6 +484,14 @@ fun StockApp(
         ClearDialog(
             onClearSelected = { vm.clearSelected(); showClearDialog = false },
             onClearAll = { vm.clearAll(); showClearDialog = false },
+            onDeleteSelected = {
+                val idx = state.selectedIndex
+                val name = state.accounts.getOrNull(idx)?.stock?.name
+                if (idx >= 0 && name != null) {
+                    deleteTarget = idx to name
+                    showClearDialog = false
+                }
+            },
             onDismiss = { showClearDialog = false }
         )
     }
@@ -501,42 +510,79 @@ fun StockApp(
     }
 }
 
-// ---------------- 股票切换标签栏（chip 上带删除按钮） ----------------
+// ---------------- 股票切换下拉选择器（股票多时无需横向滑动，点开即见全部） ----------------
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun StockBar(
+private fun StockSelector(
     accounts: List<StockAccount>,
     selectedIndex: Int,
     onSelect: (Int) -> Unit,
-    onAddClick: () -> Unit,
-    onDelete: (Int) -> Unit
+    onAddClick: () -> Unit
 ) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        accounts.forEachIndexed { i, acc ->
-            FilterChip(
-                selected = i == selectedIndex,
-                onClick = { onSelect(i) },
-                label = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(acc.stock.name)
-                        Spacer(Modifier.width(2.dp))
-                        Icon(
-                            Icons.Default.Close,
-                            contentDescription = "删除 ${acc.stock.name}",
-                            modifier = Modifier
-                                .size(14.dp)
-                                .clickable { onDelete(i) },
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+    var expanded by remember { mutableStateOf(false) }
+    val selected = accounts.getOrNull(selectedIndex)
+    Box {
+        Surface(
+            onClick = { expanded = true },
+            shape = RoundedCornerShape(8.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = androidx.compose.foundation.BorderStroke(
+                1.dp, MaterialTheme.colorScheme.outlineVariant
+            ),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    selected?.stock?.name ?: "选择股票",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f)
+                )
+                if (accounts.size > 1) {
+                    Text(
+                        "${selectedIndex + 1}/${accounts.size}",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                }
+                Icon(
+                    Icons.Default.ArrowDropDown,
+                    contentDescription = "切换股票",
+                    tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+            }
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            accounts.forEachIndexed { i, acc ->
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            acc.stock.name,
+                            fontSize = 14.sp,
+                            color = if (i == selectedIndex) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface
                         )
+                    },
+                    onClick = {
+                        onSelect(i)
+                        expanded = false
                     }
+                )
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f))
+            DropdownMenuItem(
+                text = { Text("＋ 添加股票", fontSize = 14.sp) },
+                onClick = {
+                    expanded = false
+                    onAddClick()
                 }
             )
         }
-        FilterChip(selected = false, onClick = onAddClick, label = { Text("＋ 添加") })
     }
 }
 
@@ -691,6 +737,43 @@ private fun AccountPnlBar(s: StockState, onRefreshAll: () -> Unit) {
 
 @Composable
 private fun signedMoney(v: Double): String = if (v >= 0) "+${formatMoney(v)}" else formatMoney(v)
+
+// ---------------- 持仓概览卡：左右滑切换股票（整页联动：滑动后下方卡片跟随） ----------------
+@Composable
+private fun StockOverviewPager(
+    accounts: List<StockAccount>,
+    selectedIndex: Int,
+    onSelect: (Int) -> Unit,
+    onEditPrice: () -> Unit,
+    onRefresh: () -> Unit,
+    onIntraday: () -> Unit
+) {
+    val pagerState = rememberPagerState(initialPage = selectedIndex.coerceIn(0, (accounts.size - 1).coerceAtLeast(0))) { accounts.size }
+    // 滑动到第 N 页 → 选中第 N 只（触发下方卡片联动刷新）
+    LaunchedEffect(pagerState.currentPage) {
+        val page = pagerState.currentPage
+        if (page != selectedIndex && page in accounts.indices) onSelect(page)
+    }
+    // 外部（下拉/删除）改变选中 → 回滚 Pager 页码
+    LaunchedEffect(selectedIndex) {
+        if (selectedIndex in accounts.indices && selectedIndex != pagerState.currentPage) {
+            pagerState.scrollToPage(selectedIndex)
+        }
+    }
+    HorizontalPager(
+        state = pagerState,
+        modifier = Modifier
+            .fillMaxWidth()
+            .wrapContentHeight()
+    ) { page ->
+        SummaryCard(
+            accounts[page],
+            onEditPrice = onEditPrice,
+            onRefresh = onRefresh,
+            onIntraday = onIntraday
+        )
+    }
+}
 
 // ---------------- 概览卡片 ----------------
 @Composable
@@ -1083,19 +1166,36 @@ private fun TradeRow(t: com.example.stocktracker.TradeRecord, cleared: Boolean =
     }
 }
 
-// ---------------- 一键清空 ----------------
+// ---------------- 一键清空 / 删除当前股票 ----------------
 @Composable
-private fun ClearDialog(onClearSelected: () -> Unit, onClearAll: () -> Unit, onDismiss: () -> Unit) {
+private fun ClearDialog(
+    onClearSelected: () -> Unit,
+    onClearAll: () -> Unit,
+    onDeleteSelected: () -> Unit,
+    onDismiss: () -> Unit
+) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("一键清空") },
-        text = { Text("请选择清空范围：") },
-        confirmButton = {
-            Row {
-                TextButton(onClick = onClearSelected) { Text("仅清空当前") }
-                TextButton(onClick = onClearAll) { Text("清空全部股票") }
-                TextButton(onClick = onDismiss) { Text("取消") }
+        title = { Text("清空 / 删除") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("请选择操作：")
+                TextButton(
+                    onClick = onClearSelected,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("仅清空当前股票的数据", modifier = Modifier.fillMaxWidth()) }
+                TextButton(
+                    onClick = onClearAll,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("清空全部股票的数据", modifier = Modifier.fillMaxWidth()) }
+                TextButton(
+                    onClick = onDeleteSelected,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("删除当前股票（含全部数据）", color = MaterialTheme.colorScheme.error, modifier = Modifier.fillMaxWidth()) }
             }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
         }
     )
 }
@@ -1280,7 +1380,6 @@ private fun HomeScreen(
     predUi: PredictionViewModel.UiState,
     onSelect: (Int) -> Unit,
     onAdd: () -> Unit,
-    onDelete: (Int) -> Unit,
     onRefreshAll: () -> Unit,
     onEditPrice: () -> Unit,
     onRefreshPrice: () -> Unit,
@@ -1311,12 +1410,11 @@ private fun HomeScreen(
         } else {
             item { AccountPnlBar(state, onRefreshAll = onRefreshAll) }
             item {
-                StockBar(
+                StockSelector(
                     accounts = state.accounts,
                     selectedIndex = state.selectedIndex,
                     onSelect = onSelect,
-                    onAddClick = onAdd,
-                    onDelete = onDelete
+                    onAddClick = onAdd
                 )
             }
         }
@@ -1324,8 +1422,10 @@ private fun HomeScreen(
             // 无选中股票时只有添加按钮，无需其他提示
         } else {
             item {
-                SummaryCard(
-                    acc,
+                StockOverviewPager(
+                    accounts = state.accounts,
+                    selectedIndex = state.selectedIndex,
+                    onSelect = onSelect,
                     onEditPrice = onEditPrice,
                     onRefresh = onRefreshPrice,
                     onIntraday = onIntraday
@@ -1350,7 +1450,7 @@ private fun HomeScreen(
                     OutlinedButton(
                         onClick = onClear,
                         modifier = Modifier.weight(1f)
-                    ) { Text("清空") }
+                    ) { Text("清空/删除") }
                 }
             }
         }
