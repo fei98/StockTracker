@@ -698,18 +698,20 @@ class StockViewModelTest {
         assertTrue(vm.state.value.message!!.contains("2 元"))
     }
 
-    // ---------------- T+1 可卖规则 ----------------
+    // ---------------- T+1 展示与卖出匹配（v14：卖出不再受 T+1 限制） ----------------
 
     @Test
-    fun T1_当日买入_不可卖_卖出被拒绝() {
+    fun T1_当日买入_可卖显示0但卖出不再受限() {
         val vm = vmWithStock()
         vm.buy(3.0, 100) // 今天买入
         val acc = vm.state.value.selected!!
         assertEquals(100, acc.totalQty)
-        assertEquals(0, acc.sellableQty)
+        assertEquals(0, acc.sellableQty) // 概览仍按 T+1 显示可卖 0
         vm.sell(3.5, 100)
-        assertTrue(acc.trades.size == 1) // 只有买入记录
-        assertTrue(vm.state.value.message!!.contains("T+1"))
+        val after = vm.state.value.selected!!
+        assertTrue(after.trades.size == 2) // 买入 + 卖出都记录
+        assertEquals(0, after.totalQty)
+        assertEquals(50.0, after.trades.last().profit, 0.0001)
     }
 
     @Test
@@ -722,32 +724,31 @@ class StockViewModelTest {
     }
 
     @Test
-    fun T1_部分冻结_只能卖可卖部分() {
+    fun 卖出_可卖显示T1_但卖出按全仓最低价匹配() {
         val vm = vmWithStock()
         vm.buy(3.0, 100, time = yesterday) // 可卖
-        vm.buy(5.0, 200)                   // 今日买入冻结
+        vm.buy(5.0, 200)                   // 今日买入，可卖仍按 T+1 显示 0
         var acc = vm.state.value.selected!!
         assertEquals(300, acc.totalQty)
-        assertEquals(100, acc.sellableQty)
-        vm.sell(4.0, 150) // 超过可卖数量，被拒
-        assertTrue(vm.state.value.message!!.contains("可卖数量"))
+        assertEquals(100, acc.sellableQty) // 概览仍按 T+1 显示可卖 100
+        vm.sell(4.0, 150) // 超过"可卖数"，但卖出不限制 → 成功
         acc = vm.state.value.selected!!
-        assertEquals(300, acc.totalQty)
-        vm.sell(4.0, 100) // 只卖可卖的 100 股
-        acc = vm.state.value.selected!!
-        assertEquals(200, acc.totalQty)
-        assertEquals(0, acc.sellableQty) // 剩的全是今日买入的冻结批次
-        assertEquals(100.0, acc.trades.last().profit, 0.0001)
+        assertEquals(150, acc.totalQty)
+        // 最低价优先：3元100股 + 5元50股 → (4-3)*100 + (4-5)*50 = 100 - 50 = 50
+        assertEquals(50.0, acc.trades.last().profit, 0.0001)
+        assertEquals(1, acc.holdings.size)
+        assertEquals(5.0, acc.holdings[0].price, 0.0001)
+        assertEquals(150, acc.holdings[0].remainingQty)
     }
 
     @Test
-    fun T1_卖出只抵扣可卖批次_不动冻结批次() {
+    fun 卖出_最低价优先不区分买入日期() {
         val vm = vmWithStock()
-        vm.buy(1.0, 100, time = yesterday) // 可卖，低价
-        vm.buy(3.0, 100)                   // 今日买入，冻结
+        vm.buy(1.0, 100)                    // 今日买入，低价
+        vm.buy(3.0, 100, time = yesterday)   // 昨买入，高价
         vm.sell(2.0, 100)
         val acc = vm.state.value.selected!!
-        // 只抵扣1元的100股，3元冻结批次保留
+        // 最低价优先扣除今天的 1 元 100 股（不受 T+1 限制）
         assertEquals(100, acc.totalQty)
         assertEquals(3.0, acc.holdings[0].price, 0.0001)
         assertEquals(100, acc.holdings[0].remainingQty)

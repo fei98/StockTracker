@@ -130,6 +130,9 @@ import kotlinx.coroutines.withContext
 import com.example.stocktracker.formatMoney
 import com.example.stocktracker.formatPrice
 import com.example.stocktracker.formatTime
+import com.example.stocktracker.clearedTradeIds
+import com.example.stocktracker.expectedPriceForProfit
+import com.example.stocktracker.pctChangeFromAvgPrice
 import com.example.stocktracker.isSameDay
 import com.example.stocktracker.isValidCodeInput
 import com.example.stocktracker.minuteIndexOf
@@ -347,7 +350,7 @@ fun StockApp(
 
     if (showTradeDialog && acc != null) {
         TradeDialog(
-            sellableQty = acc.sellableQty,
+            totalQty = acc.totalQty,
             onBuy = vm::buy,
             onSell = vm::sell,
             onDismiss = { showTradeDialog = false }
@@ -356,6 +359,9 @@ fun StockApp(
     if (showPriceDialog) {
         PriceDialog(
             current = acc?.currentPrice,
+            avgPrice = acc?.avgPrice ?: 0.0,
+            totalCostWithFee = acc?.totalCostWithFee ?: 0.0,
+            totalQty = acc?.totalQty ?: 0,
             onSet = vm::setCurrentPrice,
             onRefresh = vm::refreshPrice,
             onDismiss = { showPriceDialog = false }
@@ -813,11 +819,17 @@ private fun InfoCol(label: String, value: String, valueColor: Color = Color.Whit
 @Composable
 private fun PriceDialog(
     current: Double?,
+    avgPrice: Double,
+    totalCostWithFee: Double,
+    totalQty: Int,
     onSet: (Double?) -> Unit,
     onRefresh: () -> Unit,
     onDismiss: () -> Unit
 ) {
     var text by remember { mutableStateOf("") }
+    var targetText by remember { mutableStateOf("") }
+    val target = targetText.toDoubleOrNull()
+    val expected = if (target != null && totalQty > 0) expectedPriceForProfit(totalCostWithFee, totalQty, target) else null
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("设置现价") },
@@ -834,6 +846,26 @@ private fun PriceDialog(
                 Spacer(Modifier.height(4.dp))
                 HintText("当前现价：${current?.let { "¥${formatPrice(it)}" } ?: "未设置"}")
                 Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = targetText,
+                    onValueChange = { t -> targetText = t.filter { c -> c.isDigit() || c == '-' || c == '.' } },
+                    label = { Text("目标盈利额(元，可为负)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (target != null && expected != null) {
+                    val growth = pctChangeFromAvgPrice(avgPrice, expected)
+                    Spacer(Modifier.height(4.dp))
+                    HintText(
+                        "期望现价 ¥${formatPrice(expected)}" +
+                            if (avgPrice > 0) "（相对持仓均价上涨 ${String.format("%.2f%%", growth)}）" else ""
+                    )
+                } else if (targetText.isNotBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    HintText("当前无持仓，无法反推期望现价")
+                }
+                Spacer(Modifier.height(8.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
                         onClick = { onRefresh(); onDismiss() },
@@ -847,6 +879,13 @@ private fun PriceDialog(
                         onClick = { onSet(null); onDismiss() },
                         modifier = Modifier.weight(1f)
                     ) { Text("清除") }
+                }
+                if (expected != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = { onSet(expected); onDismiss() },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("设为现价（目标盈利反推）", fontWeight = FontWeight.Bold) }
                 }
             }
         },
@@ -863,7 +902,7 @@ private fun PriceDialog(
 // ---------------- 交易弹窗（买入/卖出） ----------------
 @Composable
 private fun TradeDialog(
-    sellableQty: Int,
+    totalQty: Int,
     onBuy: (Double, Int) -> Unit,
     onSell: (Double, Int) -> Unit,
     onDismiss: () -> Unit
@@ -900,10 +939,7 @@ private fun TradeDialog(
                 }
                 if (!isBuy) {
                     Spacer(Modifier.height(4.dp))
-                    HintText(
-                        if (sellableQty > 0) "可卖 $sellableQty 股（当日买入的部分 T+1 冻结）"
-                        else "今日买入的股票需 T+1，次日才能卖出"
-                    )
+                    HintText("当前持仓 $totalQty 股，支持分批卖出（按最低价优先匹配）")
                 }
                 Spacer(Modifier.height(10.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -948,13 +984,12 @@ private fun TradeDialog(
 @Composable
 private fun HoldingsCard(acc: StockAccount) {
     val lots = acc.lotPnls
-    val sellableIds = acc.sellableHoldings.map { it.id }.toSet()
     SectionCard(title = "持仓明细") {
         if (lots.isEmpty()) {
             EmptyText("暂无持仓")
         } else {
             lots.sortedByDescending { it.lot.price }.forEach { lp ->
-                LotRow(lp, acc.currentPrice, lp.lot.id !in sellableIds)
+                LotRow(lp, acc.currentPrice)
                 HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
             }
         }
@@ -962,7 +997,7 @@ private fun HoldingsCard(acc: StockAccount) {
 }
 
 @Composable
-private fun LotRow(lp: com.example.stocktracker.LotPnl, currentPrice: Double?, frozen: Boolean) {
+private fun LotRow(lp: com.example.stocktracker.LotPnl, currentPrice: Double?) {
     val lot = lp.lot
     Row(
         Modifier.fillMaxWidth().padding(vertical = 6.dp),
@@ -973,22 +1008,6 @@ private fun LotRow(lp: com.example.stocktracker.LotPnl, currentPrice: Double?, f
             Text("¥${formatPrice(lot.price)} 买入", fontWeight = FontWeight.Medium)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("剩余 ${lot.remainingQty} 股", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
-                Spacer(Modifier.width(6.dp))
-                if (frozen) {
-                    Box(
-                        Modifier
-                            .background(Color(0xFFF9A825).copy(alpha = 0.15f), RoundedCornerShape(4.dp))
-                            .padding(horizontal = 5.dp, vertical = 1.dp)
-                    ) {
-                        Text(
-                            "今日买入 · T+1冻结",
-                            color = Color(0xFFF9A825),
-                            fontSize = 10.sp, fontWeight = FontWeight.Bold
-                        )
-                    }
-                } else {
-                    Text("可卖", fontSize = 11.sp, color = UpColor)
-                }
             }
         }
         val pctText = if (currentPrice != null) String.format("%.2f%%", lp.pnlPercent) else "—"
@@ -999,17 +1018,18 @@ private fun LotRow(lp: com.example.stocktracker.LotPnl, currentPrice: Double?, f
     }
 }
 
-// ---------------- 交易记录卡片（默认 3 条，点击"查看全部"原地展开） ----------------
+// ---------------- 交易记录卡片（默认 3 条，点击"查看全部"原地展开；已清仓的记录置灰） ----------------
 @Composable
 private fun HistoryPreviewCard(trades: List<com.example.stocktracker.TradeRecord>) {
     var expanded by remember { mutableStateOf(false) }
+    val clearedIds = remember(trades) { clearedTradeIds(trades) }
     SectionCard(title = "交易记录") {
         if (trades.isEmpty()) {
             EmptyText("暂无交易")
         } else {
             val shown = if (expanded) trades.reversed() else trades.reversed().take(3)
             shown.forEach { t ->
-                TradeRow(t)
+                TradeRow(t, cleared = t.id in clearedIds)
                 HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
             }
             if (trades.size > 3) {
@@ -1023,7 +1043,8 @@ private fun HistoryPreviewCard(trades: List<com.example.stocktracker.TradeRecord
 }
 
 @Composable
-private fun TradeRow(t: com.example.stocktracker.TradeRecord) {
+private fun TradeRow(t: com.example.stocktracker.TradeRecord, cleared: Boolean = false) {
+    val dim = MaterialTheme.colorScheme.onSurface.copy(alpha = if (cleared) 0.35f else 1f)
     Row(
         Modifier.fillMaxWidth().padding(vertical = 6.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1034,39 +1055,46 @@ private fun TradeRow(t: com.example.stocktracker.TradeRecord) {
                 Box(
                     Modifier
                         .background(
-                            if (t.type == TradeType.BUY) UpColor.copy(alpha = 0.15f) else DownColor.copy(alpha = 0.15f),
+                            if (t.type == TradeType.BUY) UpColor.copy(alpha = if (cleared) 0.10f else 0.15f)
+                            else DownColor.copy(alpha = if (cleared) 0.10f else 0.15f),
                             RoundedCornerShape(4.dp)
                         )
                         .padding(horizontal = 6.dp, vertical = 2.dp)
                 ) {
                     Text(
                         if (t.type == TradeType.BUY) "买入" else "卖出",
-                        color = if (t.type == TradeType.BUY) UpColor else DownColor,
+                        color = if (cleared) dim else if (t.type == TradeType.BUY) UpColor else DownColor,
                         fontSize = 11.sp, fontWeight = FontWeight.Bold
                     )
                 }
                 Spacer(Modifier.width(8.dp))
-                Text("¥${formatPrice(t.price)} × ${t.qty}股", fontWeight = FontWeight.Medium)
+                Text("¥${formatPrice(t.price)} × ${t.qty}股", fontWeight = FontWeight.Medium, color = dim)
             }
             Text(
                 "${formatTime(t.time)} · 成本 ¥${formatMoney(t.cost)}",
-                fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (cleared) 0.25f else 0.5f)
             )
+            if (cleared) {
+                Text(
+                    "已清仓",
+                    fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
+                )
+            }
         }
         if (t.type == TradeType.SELL) {
             Column(horizontalAlignment = Alignment.End) {
                 Text(
                     "${if (t.netProfit >= 0) "+" else ""}${formatMoney(t.netProfit)}",
-                    color = pnlColor(t.netProfit), fontWeight = FontWeight.Bold
+                    color = if (cleared) dim else pnlColor(t.netProfit), fontWeight = FontWeight.Bold
                 )
                 if (t.fee > 0) {
-                    Text("手续费 ¥${formatMoney(t.fee)}", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                    Text("手续费 ¥${formatMoney(t.fee)}", fontSize = 10.sp, color = dim.copy(alpha = 0.7f))
                 }
             }
         } else if (t.fee > 0) {
             Text(
                 "手续费 ¥${formatMoney(t.fee)}",
-                fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                fontSize = 11.sp, color = dim.copy(alpha = 0.7f)
             )
         }
     }
@@ -1458,7 +1486,11 @@ private fun DonutChart(entries: List<OverviewEntry>, tab: OverviewTab, total: Do
         }
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(tab.label, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
-            Text("合计 ${signedMoney(signedTotal)}", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+            if (tab == OverviewTab.SHARES) {
+                Text("合计 ${signedTotal.toLong()} 股", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+            } else {
+                Text("合计 ${signedMoney(signedTotal)}", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+            }
         }
     }
 }
@@ -1470,7 +1502,7 @@ private val overviewPalette = listOf(
 )
 
 private fun overviewColor(e: OverviewEntry, tab: OverviewTab, index: Int): Color = when (tab) {
-    OverviewTab.VALUE -> overviewPalette[index % overviewPalette.size]
+    OverviewTab.VALUE, OverviewTab.SHARES -> overviewPalette[index % overviewPalette.size]
     else -> if (e.value >= 0) UpColor else DownColor
 }
 
@@ -1485,12 +1517,20 @@ private fun OverviewLegendRow(e: OverviewEntry, tab: OverviewTab, total: Double,
         Box(Modifier.size(10.dp).background(color, RoundedCornerShape(2.dp)))
         Spacer(Modifier.width(8.dp))
         Text(e.name, fontSize = 13.sp, modifier = Modifier.weight(1f))
-        val sign = if (e.value > 0 && tab != OverviewTab.VALUE) "+" else ""
-        Text(
-            sign + formatMoney(e.value),
-            fontSize = 13.sp, fontWeight = FontWeight.Bold,
-            color = if (tab == OverviewTab.VALUE) MaterialTheme.colorScheme.onSurface else color
-        )
+        if (tab == OverviewTab.SHARES) {
+            Text(
+                "${e.value.toLong()} 股",
+                fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        } else {
+            val sign = if (e.value > 0 && tab != OverviewTab.VALUE) "+" else ""
+            Text(
+                sign + formatMoney(e.value),
+                fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                color = if (tab == OverviewTab.VALUE) MaterialTheme.colorScheme.onSurface else color
+            )
+        }
         Spacer(Modifier.width(8.dp))
         Text(String.format("%.1f%%", pct), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
     }

@@ -4,7 +4,8 @@ package com.example.stocktracker
 enum class OverviewTab(val label: String) {
     FLOAT("浮盈"),
     VALUE("市值"),
-    REALIZED("已实现")
+    REALIZED("已实现"),
+    SHARES("股数")
 }
 
 /** 总览单项（一只股票的某个口径） */
@@ -15,4 +16,5 @@ fun overviewEntries(accounts: List<StockAccount>, tab: OverviewTab): List<Overvi
     OverviewTab.FLOAT -> accounts.map { OverviewEntry(it.stock.name, it.floatingPnlFee) }
     OverviewTab.VALUE -> accounts.map { OverviewEntry(it.stock.name, it.marketValue) }
     OverviewTab.REALIZED -> accounts.map { OverviewEntry(it.stock.name, it.realizedPnlFee) }
+    OverviewTab.SHARES -> accounts.map { OverviewEntry(it.stock.name, it.totalQty.toDouble()) }
 }

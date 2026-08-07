@@ -271,11 +271,10 @@ fun recalcHistoricalFees(s: StockState, feeConfig: FeeConfig): StockState {
                 lots += LotState(t.id, t.price, t.qty, t.qty, t.time, fee)
                 t.copy(fee = fee)
             } else {
-                // 最低价优先匹配可卖批次（A 股当日买入冻结 T+1）
-                val frozen = acc.stock.market != "hk" && acc.stock.market != "us"
+                // 最低价优先匹配全部批次（不区分买入日期）
                 var toSell = t.qty
                 var costFee = 0.0
-                val sellable = lots.filter { !(frozen && isSameDay(it.time, t.time)) }.sortedBy { it.price }
+                val sellable = lots.sortedBy { it.price }
                 for (lot in sellable) {
                     if (toSell <= 0) break
                     val take = minOf(lot.remainingQty, toSell)
@@ -292,4 +291,48 @@ fun recalcHistoricalFees(s: StockState, feeConfig: FeeConfig): StockState {
         acc.copy(holdings = holdings, trades = newTrades, totalBuyFee = totalBuyFee)
     }
     return s.copy(accounts = newAccounts)
+}
+
+/**
+ * 目标盈利额反推期望现价 = (含费总成本 + 目标盈利) / 总持仓数；无持仓返回 0。
+ * 目标盈利可为负（对应目标亏损）。
+ */
+fun expectedPriceForProfit(totalCostWithFee: Double, totalQty: Int, targetProfit: Double): Double =
+    if (totalQty > 0) (totalCostWithFee + targetProfit) / totalQty else 0.0
+
+/** 相对持仓均价的上涨比例% = (现价 − 均价) / 均价 × 100；均价 ≤ 0 返回 0 */
+fun pctChangeFromAvgPrice(avgPrice: Double, price: Double): Double =
+    if (avgPrice > 0) (price - avgPrice) / avgPrice * 100 else 0.0
+
+/**
+ * 交易记录“清仓置灰”判定：按交易时间序重放买卖，最低价优先抵扣（与 sell() 一致，不区分买入日期）。
+ * 返回已清仓的交易 id 集合：
+ *  - 买入：其批次剩余数量为 0（已全部卖出）→ 置灰
+ *  - 卖出：所消耗的批次全部被清空 → 置灰；只部分消耗（还有批次未卖完）→ 不置灰（未卖完的批次保持正常）
+ */
+fun clearedTradeIds(trades: List<TradeRecord>): Set<Long> {
+    data class Lot(val buyTradeId: Long, val price: Double, var remaining: Int)
+    val lots = mutableListOf<Lot>()
+    val cleared = mutableSetOf<Long>()
+    for (t in trades) {
+        when (t.type) {
+            TradeType.BUY -> lots += Lot(t.id, t.price, t.qty)
+            TradeType.SELL -> {
+                var toSell = t.qty
+                var sellCleared = true
+                for (lot in lots.sortedBy { it.price }) {
+                    if (toSell <= 0) break
+                    val take = minOf(lot.remaining, toSell)
+                    lot.remaining -= take
+                    toSell -= take
+                    if (lot.remaining > 0) sellCleared = false
+                }
+                if (toSell > 0) sellCleared = false // 卖出量超出历史买入（异常数据）不作为清仓
+                if (sellCleared) cleared += t.id
+            }
+        }
+    }
+    // 已全部卖出的买入批次 → 置灰
+    lots.forEach { if (it.remaining == 0) cleared += it.buyTradeId }
+    return cleared
 }

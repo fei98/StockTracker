@@ -147,6 +147,10 @@ class FeeTest {
         val realized = overviewEntries(accounts, OverviewTab.REALIZED)
         assertEquals(accounts[0].realizedPnlFee, realized[0].value, 0.0001)
         assertEquals(accounts[1].realizedPnlFee, realized[1].value, 0.0001)
+
+        val shares = overviewEntries(accounts, OverviewTab.SHARES)
+        assertEquals(accounts[0].totalQty.toDouble(), shares[0].value, 0.0001)
+        assertEquals(accounts[1].totalQty.toDouble(), shares[1].value, 0.0001)
     }
 
     @Test
@@ -175,10 +179,11 @@ class FeeTest {
     }
 
     @Test
-    fun 总览_空账户三口径均为空() {
+    fun 总览_空账户四口径均为空() {
         assertTrue(overviewEntries(emptyList(), OverviewTab.FLOAT).isEmpty())
         assertTrue(overviewEntries(emptyList(), OverviewTab.VALUE).isEmpty())
         assertTrue(overviewEntries(emptyList(), OverviewTab.REALIZED).isEmpty())
+        assertTrue(overviewEntries(emptyList(), OverviewTab.SHARES).isEmpty())
     }
 
     // ---------------- 历史手续费重算迁移 ----------------
@@ -242,8 +247,8 @@ class FeeTest {
     }
 
     @Test
-    fun 迁移_T1同日买入不可卖_重放不错误抵扣() {
-        // 今日买入 100 股 + 今日卖出 50 股（同日买入应冻结不可卖）
+    fun 迁移_同日买入也参与匹配_按最低价抵扣() {
+        // 今日买入 100 股 + 今日卖出 50 股（T+1 不再限制，同日买入也参与）
         val acc = StockAccount(
             stock = Stock("000001", "平安银行", "sz"),
             holdings = listOf(BuyLot(1, 3.0, 100, 100, 0L, 0.0)),
@@ -255,9 +260,11 @@ class FeeTest {
         )
         val migrated = recalcHistoricalFees(StockState(listOf(acc), 0), FeeConfig())
         val m = migrated.accounts[0]
-        // 同日买入被冻结 → 卖出无可匹配批次 → costFee=0，持仓不变
-        assertEquals(0.0, m.trades[1].costFee, 0.0001)
-        assertEquals(100, m.holdings[0].remainingQty)
+        // 同日买入参与匹配 → 买入费分摊进 costFee，持仓按卖出减少
+        assertEquals(5.003, m.trades[0].fee, 0.0001)   // buyFee(300元) = 5 + 0.003
+        assertEquals(5.0816, m.trades[1].fee, 0.0001)  // sellFee(160元) = 5 + 0.08 + 0.0016
+        assertEquals(2.5015, m.trades[1].costFee, 0.001) // buyFee(300)× 50/100
+        assertEquals(50, m.holdings[0].remainingQty)
     }
 
     @Test
