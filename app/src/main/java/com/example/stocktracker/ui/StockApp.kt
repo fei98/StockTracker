@@ -1684,6 +1684,10 @@ private fun OverviewScreen(
         else overviewEntries(accounts, dataTab).sortedByDescending { kotlin.math.abs(it.value) }
     }
     val sellableNotes = remember(accounts) { accounts.associate { it.stock.name to sellableNote(it) } }
+    // 浮盈标签右侧：当日涨跌幅（(现价-昨收)/昨收），无昨收时为 null（显示 —）
+    val dayChangeByStock = remember(accounts) {
+        accounts.associate { acc -> acc.stock.name to acc.dayChangePct }
+    }
     val total = entries.sumOf { kotlin.math.abs(it.value) }
     // 进入"盘中信号"标签自动刷新一次，停留期间每 30 秒自动刷新
     LaunchedEffect(isPredict) {
@@ -1857,7 +1861,11 @@ private fun OverviewScreen(
                 entries.forEach { e ->
                     // 仅浮盈为正的浮盈 tab 需要可卖提示；其余标签一律不标记
                     val note = if (dataTab == OverviewTab.FLOAT && e.value > 0.0001) sellableNotes[e.name] else null
-                    OverviewLegendRow(e, dataTab, total, entries.indexOf(e), sellableNote = note)
+                    OverviewLegendRow(
+                        e, dataTab, total, entries.indexOf(e),
+                        sellableNote = note,
+                        floatPct = if (dataTab == OverviewTab.FLOAT) dayChangeByStock[e.name] else null
+                    )
                 }
             }
         }
@@ -2212,10 +2220,10 @@ private fun OverviewLegendRow(
     tab: OverviewTab,
     total: Double,
     index: Int,
-    sellableNote: String? = null
+    sellableNote: String? = null,
+    floatPct: Double? = null
 ) {
     val color = overviewColor(e, tab, index)
-    val pct = if (total > 0) kotlin.math.abs(e.value) / total * 100 else 0.0
     Row(
         Modifier.fillMaxWidth().padding(vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -2254,7 +2262,23 @@ private fun OverviewLegendRow(
             )
         }
         Spacer(Modifier.width(8.dp))
-        Text(String.format("%.1f%%", pct), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+        if (tab == OverviewTab.FLOAT) {
+            // 浮盈标签：右侧显示当日涨跌幅，无昨收时显示 —
+            val pctText = floatPct?.let { "${if (it > 0) "+" else ""}${String.format("%.2f%%", it)}" } ?: "—"
+            Text(
+                pctText,
+                fontSize = 12.sp, fontWeight = FontWeight.Medium,
+                color = when {
+                    floatPct == null -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                    floatPct > 0.0001 -> UpColor
+                    floatPct < -0.0001 -> DownColor
+                    else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                }
+            )
+        } else {
+            val pct = if (total > 0) kotlin.math.abs(e.value) / total * 100 else 0.0
+            Text(String.format("%.1f%%", pct), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+        }
     }
 }
 
