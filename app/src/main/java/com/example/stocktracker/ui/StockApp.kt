@@ -99,6 +99,7 @@ import com.example.stocktracker.IntradayAction
 import com.example.stocktracker.IntradaySignal
 import com.example.stocktracker.AppNotification
 import com.example.stocktracker.MinutePoint
+import com.example.stocktracker.NotificationDetail
 import com.example.stocktracker.NotificationKind
 import com.example.stocktracker.NotificationLogStore
 import com.example.stocktracker.OverviewEntry
@@ -141,7 +142,10 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun StockApp() {
+fun StockApp(
+    pendingDetail: NotificationDetail? = null,
+    onConsumeDetail: () -> Unit = {}
+) {
     val context = LocalContext.current
     val vm: StockViewModel = viewModel {
         StockViewModel(PrefsStorage(context), feeStore = FeeConfigStore(context))
@@ -378,6 +382,10 @@ fun StockApp() {
             store = notifLogStore,
             onDismiss = { showNotifications = false }
         )
+    }
+
+    pendingDetail?.let { d ->
+        NotificationDetailDialog(detail = d, onDismiss = onConsumeDetail)
     }
 
     if (showOverview) {
@@ -1485,6 +1493,50 @@ private fun OverviewLegendRow(e: OverviewEntry, tab: OverviewTab, total: Double,
         )
         Spacer(Modifier.width(8.dp))
         Text(String.format("%.1f%%", pct), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+    }
+}
+
+// ---------------- 系统通知点按后的消息详情弹窗 ----------------
+@Composable
+private fun NotificationDetailDialog(detail: NotificationDetail, onDismiss: () -> Unit) {
+    val badgeColor = if (detail.kindLabel == NotificationKind.INTRADAY.label) Color(0xFF00897B)
+    else MaterialTheme.colorScheme.primary
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier
+                            .background(badgeColor, RoundedCornerShape(4.dp))
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                    ) {
+                        Text(
+                            detail.kindLabel.ifEmpty { "通知" },
+                            fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White
+                        )
+                    }
+                    Spacer(Modifier.weight(1f))
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "关闭")
+                    }
+                }
+                Text(detail.title, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                HorizontalDivider()
+                Text(
+                    detail.body,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
+                )
+                TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) {
+                    Text("关闭")
+                }
+            }
+        }
     }
 }
 

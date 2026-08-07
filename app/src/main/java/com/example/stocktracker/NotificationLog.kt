@@ -19,6 +19,13 @@ data class AppNotification(
     val body: String
 )
 
+/** 系统通知点按后跳转展示的消息详情（由 PendingIntent extras 携带） */
+data class NotificationDetail(
+    val kindLabel: String,
+    val title: String,
+    val body: String
+)
+
 /** 通知历史持久化（v13）：竞价预测 + 盘中信号通知统一落盘，右上角铃铛可回看、可一键清空 */
 interface NotificationLogStore {
     fun load(): List<AppNotification>
