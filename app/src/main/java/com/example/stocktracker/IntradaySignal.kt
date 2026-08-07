@@ -9,6 +9,17 @@ enum class IntradayAction(val label: String) {
     BUY("买入信号"), HOLD("持有"), SELL("卖出信号"), WATCH("观望"), NO_TRADE("不交易")
 }
 
+/**
+ * 操作优先级（越小越需提前操作）：
+ * BUY / SELL 并列最高（都是真操作信号）；其次 HOLD；再 WATCH；NO_TRADE 靠后。
+ */
+fun IntradayAction.priority(): Int = when (this) {
+    IntradayAction.BUY, IntradayAction.SELL -> 0
+    IntradayAction.HOLD -> 1
+    IntradayAction.WATCH -> 2
+    IntradayAction.NO_TRADE -> 3
+}
+
 /** 盘中时段（按分钟列表最后一个点位置推断，不依赖时钟） */
 enum class MarketPhase {
     EARLY,            // 开盘 30 分钟内（位置 < 40）

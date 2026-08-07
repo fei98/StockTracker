@@ -148,6 +148,8 @@ import com.example.stocktracker.pctChangeFromAvgPrice
 import com.example.stocktracker.isSameDay
 import com.example.stocktracker.isValidCodeInput
 import com.example.stocktracker.minuteIndexOf
+import com.example.stocktracker.sortHoldingSignals
+import com.example.stocktracker.isFreezeBarredSell
 import com.example.stocktracker.ui.theme.DownColor
 import com.example.stocktracker.ui.theme.StockTrackerTheme
 import com.example.stocktracker.ui.theme.UpColor
@@ -1628,7 +1630,7 @@ private fun OverviewScreen(
             }
         }
         if (isPredict) {
-            PredictionPanel(predUi, onRefreshSignals)
+            PredictionPanel(predUi)
         } else if (accounts.isEmpty()) {
             EmptyText("暂无股票数据")
         } else {
@@ -1644,77 +1646,88 @@ private fun OverviewScreen(
 }
 
 @Composable
-private fun PredictionPanel(predUi: PredictionViewModel.UiState, onRefresh: () -> Unit) {
-    Column {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "盘中信号",
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                modifier = Modifier.weight(1f)
-            )
-            if (predUi.running) HintText("刷新中…")
-            Spacer(Modifier.width(4.dp))
-            TextButton(onClick = onRefresh) { Text("刷新", fontSize = 12.sp) }
-        }
-        Spacer(Modifier.height(8.dp))
-        if (predUi.allSignals.isEmpty()) {
-            HintText(predUi.error ?: "加载持仓盘中信号…")
-        } else {
-            LazyColumn(Modifier.heightIn(max = 360.dp)) {
-                items(predUi.allSignals) { row ->
-                    val sig = row.signal
-                    Row(
-                        Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+private fun PredictionPanel(predUi: PredictionViewModel.UiState) {
+    // 展开的股票代码集合（默认全部收起，点击单行展开/收起）
+    var expandedCodes by remember { mutableStateOf(setOf<String>()) }
+    if (predUi.allSignals.isEmpty()) {
+        HintText(predUi.error ?: "加载持仓盘中信号…")
+    } else {
+        LazyColumn {
+            items(sortHoldingSignals(predUi.allSignals)) { row ->
+                val sig = row.signal
+                val code = row.stock.marketCode
+                val expanded = code in expandedCodes
+                val freezeSell = isFreezeBarredSell(row)
+                // 紧凑单行：股票名 + 动作/分数
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            expandedCodes = if (expanded) expandedCodes - code else expandedCodes + code
+                        }
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        row.stock.name,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (sig == null) {
+                        HintText("获取失败")
+                    } else if (sig.pending != null) {
                         Text(
-                            row.stock.name,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.weight(1f)
+                            sig.pending,
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                         )
-                        if (sig == null) {
-                            HintText("获取失败")
-                        } else {
-                            Text(
-                                sig.pending ?: "${sig.action.label} ${String.format("%+.1f", sig.score)}",
-                                fontSize = 13.sp, fontWeight = FontWeight.Bold,
-                                color = when {
-                                    sig.pending != null -> MaterialTheme.colorScheme.primary
-                                    sig.action == IntradayAction.BUY -> UpColor
-                                    sig.action == IntradayAction.SELL -> DownColor
-                                    sig.action == IntradayAction.HOLD -> MaterialTheme.colorScheme.primary
-                                    else -> MaterialTheme.colorScheme.onSurface
-                                }
-                            )
+                    } else {
+                        val actionColor = when (sig.action) {
+                            IntradayAction.BUY -> UpColor
+                            IntradayAction.SELL -> DownColor
+                            IntradayAction.HOLD -> MaterialTheme.colorScheme.primary
+                            else -> MaterialTheme.colorScheme.onSurface
                         }
-                    }
-                    val shown = sig?.reasons?.take(2).orEmpty()
-                    if (shown.isNotEmpty()) {
-                        Row(Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
+                        Text(
+                            "${sig.action.label} ${String.format("%+.1f", sig.score)}",
+                            fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                            color = actionColor
+                        )
+                        if (freezeSell) {
                             Text(
-                                shown.joinToString(" · "),
+                                "T+1冻结",
                                 fontSize = 10.sp,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
-                                modifier = Modifier.padding(start = 0.dp)
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.padding(start = 4.dp)
                             )
                         }
                     }
-                    val stats = row.stats
-                    if (stats != null) {
-                        val rateText = stats.hitRatePct?.let { "命中率 $it" } ?: "样本积累中"
-                        Row(Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
+                }
+                // 展开详情：原因 + 历史验证
+                if (expanded) {
+                    Column(Modifier.padding(start = 0.dp, bottom = 8.dp)) {
+                        sig?.reasons?.forEach { r ->
+                            Text(
+                                "· $r",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                                modifier = Modifier.padding(bottom = 2.dp)
+                            )
+                        }
+                        val stats = row.stats
+                        if (stats != null) {
+                            val rateText = stats.hitRatePct?.let { "命中率 $it" } ?: "样本积累中"
                             Text(
                                 "历史验证：$rateText（${stats.directional} 样本） · 扣费期望 ${stats.avgNetMoveText ?: "—"}",
                                 fontSize = 10.sp,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
-                                modifier = Modifier.padding(start = 0.dp)
+                                modifier = Modifier.padding(bottom = 4.dp)
                             )
                         }
                     }
-                    HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
                 }
+                HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
             }
         }
     }

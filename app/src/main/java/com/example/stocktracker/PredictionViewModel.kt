@@ -24,6 +24,7 @@ class PredictionViewModel(
         val signal: IntradaySignal?,
         val prevClose: Double?,
         val hasPosition: Boolean,
+        val canSell: Boolean = false,
         val stats: IntradaySignalStats? = null
     )
 
@@ -94,7 +95,7 @@ class PredictionViewModel(
                         val stats = signalStore?.let {
                             statsOf(it.loadSnapshots(acc.stock.marketCode, PredictionEngine.today()))
                         }
-                        HoldingSignal(acc.stock, signal, acc.prevClose, acc.totalQty > 0, stats)
+                        HoldingSignal(acc.stock, signal, acc.prevClose, acc.totalQty > 0, acc.sellableQty > 0, stats)
                     }
                 }.awaitAll()
             }
@@ -105,4 +106,33 @@ class PredictionViewModel(
 
     private suspend fun fetchIndexPoints(stock: Stock): List<MinutePoint>? =
         IndexMinuteCache.fetch(api, stock)
+}
+
+/**
+ * 全部持仓信号按"最需要操作优先"排序（纯函数，可单测）。
+ * 1. 优先级：BUY/SELL 并列最前 > HOLD > WATCH > NO_TRADE > 收集/休市(pending) > 获取失败(null)；
+ * 2. 有持仓但当日买入被 T+1 冻结、本要卖却降级为 HOLD 的，视为 SELL 同档（最前），便于用户优先看到；
+ * 3. 同优先级内按分数降序（更强的信号排前面），null/pending 视为分数 0。
+ */
+fun sortHoldingSignals(rows: List<PredictionViewModel.HoldingSignal>): List<PredictionViewModel.HoldingSignal> =
+    rows.sortedWith(compareBy<PredictionViewModel.HoldingSignal> { rankOf(it) }
+        .thenByDescending { h -> h.signal?.takeIf { it.pending == null }?.score ?: 0.0 })
+
+/** 是否"想卖但被 T+1 冻结无可卖股"（用户需优先看到但无法立即卖） */
+fun isFreezeBarredSell(h: PredictionViewModel.HoldingSignal): Boolean {
+    val s = h.signal ?: return false
+    if (h.canSell || !h.hasPosition) return false
+    // 已降级为 HOLD 且含 T+1 冻结原因（v9 文案）：说明原为 SELL 但因当日买入不可卖
+    return s.action == IntradayAction.HOLD &&
+        s.reasons.any { it.contains("T+1") || it.contains("冻结") }
+}
+
+private fun rankOf(h: PredictionViewModel.HoldingSignal): Int {
+    val s = h.signal
+    return when {
+        s == null -> 5
+        s.pending != null -> 4
+        isFreezeBarredSell(h) -> 0
+        else -> s.action.priority()
+    }
 }
