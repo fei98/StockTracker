@@ -102,6 +102,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -141,6 +142,7 @@ import com.example.stocktracker.ThemePreference
 import com.example.stocktracker.TradeType
 import com.example.stocktracker.UpdateChecker
 import com.example.stocktracker.overviewEntries
+import com.example.stocktracker.sellableNote
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -1630,6 +1632,7 @@ private fun OverviewScreen(
         if (dataTab == null) emptyList()
         else overviewEntries(accounts, dataTab).sortedByDescending { kotlin.math.abs(it.value) }
     }
+    val sellableNotes = remember(accounts) { accounts.associate { it.stock.name to sellableNote(it) } }
     val total = entries.sumOf { kotlin.math.abs(it.value) }
     // 进入"盘中信号"标签自动刷新一次，停留期间每 30 秒自动刷新
     LaunchedEffect(isPredict) {
@@ -1738,7 +1741,9 @@ private fun OverviewScreen(
             HorizontalDivider()
             LazyColumn {
                 items(entries) { e ->
-                    OverviewLegendRow(e, dataTab, total, entries.indexOf(e))
+                    // 仅浮盈为正的浮盈 tab 需要可卖提示；其余标签一律不标记
+                    val note = if (dataTab == OverviewTab.FLOAT && e.value > 0.0001) sellableNotes[e.name] else null
+                    OverviewLegendRow(e, dataTab, total, entries.indexOf(e), sellableNote = note)
                 }
             }
         }
@@ -1879,7 +1884,13 @@ private fun overviewColor(e: OverviewEntry, tab: OverviewTab, index: Int): Color
 }
 
 @Composable
-private fun OverviewLegendRow(e: OverviewEntry, tab: OverviewTab, total: Double, index: Int) {
+private fun OverviewLegendRow(
+    e: OverviewEntry,
+    tab: OverviewTab,
+    total: Double,
+    index: Int,
+    sellableNote: String? = null
+) {
     val color = overviewColor(e, tab, index)
     val pct = if (total > 0) kotlin.math.abs(e.value) / total * 100 else 0.0
     Row(
@@ -1888,7 +1899,23 @@ private fun OverviewLegendRow(e: OverviewEntry, tab: OverviewTab, total: Double,
     ) {
         Box(Modifier.size(10.dp).background(color, RoundedCornerShape(2.dp)))
         Spacer(Modifier.width(8.dp))
-        Text(e.name, fontSize = 13.sp, modifier = Modifier.weight(1f))
+        Row(
+            Modifier.weight(1f),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(e.name, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (sellableNote != null) {
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    sellableNote,
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier
+                        .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                )
+            }
+        }
         if (tab == OverviewTab.SHARES) {
             Text(
                 "${e.value.toLong()} 股",
