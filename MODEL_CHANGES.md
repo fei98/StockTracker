@@ -3,6 +3,47 @@
 > 本文件记录按评审报告建议所做的模型改动，与评审报告（MODEL_REVIEW.md / INTRADAY_SIGNAL_REVIEW.md）分开维护。
 > **约定：最新改动放在最前面，旧改动依次下移。每一轮均对应代码与测试同步更新。**
 
+## v13 改动（2026-08-07：盘中门控调优 + 通知历史 + 总览刷新）
+
+> 对应 `INTRADAY_SIGNAL_REVIEW.md` v13。三项：
+> 1) 盘中信号把“数据收集”与真实“不交易”区分开，并把开场信号门槛从 40 分钟收窄到 30 分钟（约 10:00 可出信号）；
+> 2) 竞价预测 / 盘中信号通知改为应用内落盘历史，右上角铃铛可回看、可一键清空；
+> 3) 账户总览浮盈/市值/已实现三个标签补上刷新（拉全部现价重算）。
+
+### 1. 盘中信号门控与标签（不再用“不交易”掩盖“数据不足”）✅
+
+**代码**：`IntradaySignal.kt`
+
+- `IntradaySignal` 新增 `val pending: String? = null`：`null` = 真实交易判断；非空 = 数据收集/休市等“未就绪”。
+- `noTrade(reason)`（数据不足/EARLY/AFTERNOON_START/午休/收盘）改为 `pending = reason`，动作仍为 `NO_TRADE`（保住统计口径与方向语义）。
+- 真正的“看跌 NO_TRADE”（无持仓、mom30<0、score≤−2.5）保持 `pending = null`。
+- `EARLY_POS` 40 → **30**（mom30 在位置 30 即可计算，约 10:00 出信号）；开盘收集提示改为“数据积累中（约10:00后出信号）”，午后 13:00–13:30 提示“约13:30后出信号”。
+- UI：`SignalBanner` 与总览 `PredictionPanel` 对 `pending != null` 渲染中性“收集中 · {原因}”，不再显示“不交易 0.0”。
+
+### 2. 通知历史落盘 + 右上角铃铛（竞价/盘中）
+
+**代码**：`NotificationLog.kt`（新增）、`PredictionNotifier.kt`、`PredictionWorkers.kt`、`ui/StockApp.kt`
+
+- 新增 `AppNotification`（timeMs / kind：AUCTION·INTRADAY / stock / title / body）与 `PrefsNotificationLogStore`（SharedPreferences+JSON，上限 300，最新在前，可 `clear()` 一键清空）。
+- 竞价预测 `PredictionNotifier.post`：每条结果写入一条 AUCTION 通知。
+- `IntradaySignalWorker`：采到可执行信号（BUY/SELL）时写入一条 INTRADAY 通知。
+- 顶栏动作区新增铃铛图标（位于“账户总览”**左侧**）→ `NotificationLogDialog`：时间+类型徽标+标题+内容，顶部“清空”（二次确认）一键清空全部。
+
+### 3. 账户总览浮盈/市值/已实现刷新
+
+**代码**：`ui/StockApp.kt` `OverviewDialog`
+
+- 新增 `onRefreshData`（复用 `StockViewModel.refreshAll()`，拉全部现价后重算）。
+- 标题栏加“刷新”按钮：非盘中信号标签 → `onRefreshData`（并显示“刷新中…”）；盘中信号标签 → 原信号刷新。
+
+### 4. 测试与验证
+
+- `IntradaySignalTest`：开场 30 分钟用例按新阈值重定（位置 30 起可出信号）；新增“pending 未就绪 ≠ 真实看跌 NO_TRADE”断言。
+- `NotificationLog.kt` 序列化解析、`OverviewDialog` 刷新回调走编译与集成。
+- 实测 `gradlew :app:testDebugUnitTest` **204/0 通过**；`assembleDebug` 通过；adb 安装正常。
+
+---
+
 ## v12 改动（2026-08-07：调休周末采集链判据修正）
 
 > 依据 `INTRADAY_SIGNAL_REVIEW.md` v11 §4a：`continueOnWeekend` 以"是否采到方向信号"为判据，在调休周末交易日的 WATCH/HOLD slot 或午休时段会误判为非交易日，导致 10 分钟采集链中断、当日剩余时段不再采集。

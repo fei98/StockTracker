@@ -179,7 +179,7 @@ class IntradaySignalWorker(ctx: Context, params: WorkerParameters) : CoroutineWo
                         priceLimitPct = priceLimitPct(stock),
                         canSell = acc.sellableQty > 0
                     )
-                    // 只保存有方向的信号（BUY/SELL/看跌 NO_TRADE），普通周末残留数据/状态信号不进入统计
+// 只保存有方向的信号（BUY/SELL/看跌 NO_TRADE），普通周末残留数据/状态信号不进入统计
                     val direction = directionOf(sig)
                     if (direction != null) {
                         store.addSnapshot(
@@ -194,6 +194,21 @@ class IntradaySignalWorker(ctx: Context, params: WorkerParameters) : CoroutineWo
                                 direction = direction
                             )
                         )
+                        // v13：可执行信号（买入/卖出）同步写入应用内通知历史（右上角铃铛回看）
+                        if (sig.action == IntradayAction.BUY || sig.action == IntradayAction.SELL) {
+                            runCatching {
+                                PrefsNotificationLogStore(context).add(
+                                    AppNotification(
+                                        timeMs = nowMs,
+                                        kind = NotificationKind.INTRADAY,
+                                        stock = stock.name,
+                                        title = "${stock.name} ${sig.action.label}",
+                                        body = "评分 ${String.format(java.util.Locale.US, "%+.1f", sig.score)} · " +
+                                            sig.reasons.take(2).joinToString("；")
+                                    )
+                                )
+                            }
+                        }
                     }
                 }
             }

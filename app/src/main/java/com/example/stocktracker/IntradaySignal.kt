@@ -25,7 +25,8 @@ data class IntradaySignal(
     val score: Double,
     val reasons: List<String>,
     val degraded: Boolean = false,
-    val direction: PredictionOutcome? = null // 显式方向（v11）：避免依赖"看跌"文案匹配判断语义（v10 §4e）
+    val direction: PredictionOutcome? = null, // 显式方向（v11）：避免依赖"看跌"文案匹配判断语义（v10 §4e）
+    val pending: String? = null // 数据收集/休市等"未就绪"原因（v13）：非真实交易判断，UI 显示为中性"收集中"，不叫"不交易"
 )
 
 /** 特征快照（供单测断言与 v3 标定积累） */
@@ -50,8 +51,8 @@ data class IntradayFeatures(
  */
 object IntradaySignalEvaluator {
 
-    const val MIN_POINTS = 40
-    const val EARLY_POS = 40
+    const val MIN_POINTS = 30
+    const val EARLY_POS = 30
     const val AFTERNOON_START_POS = 121
     const val AFTERNOON_STABLE_POS = 151
     const val LAST_POS = 240
@@ -94,7 +95,10 @@ object IntradaySignalEvaluator {
     /** A 股交易时区：墙钟兜底与数据新鲜度校验统一用 Asia/Shanghai，避免设备时区错置 */
     val CN_TZ: TimeZone = TimeZone.getTimeZone("Asia/Shanghai")
 
-    private fun noTrade(reason: String) = IntradaySignal(IntradayAction.NO_TRADE, 0.0, listOf(reason))
+    private fun noTrade(reason: String) = IntradaySignal(
+        IntradayAction.NO_TRADE, 0.0, listOf(reason),
+        pending = reason // v13：标记为"未就绪"，UI 不再称"不交易"
+    )
 
     fun fmt(v: Double): String = String.format(Locale.US, "%+.1f%%", v)
 
@@ -204,9 +208,9 @@ object IntradaySignalEvaluator {
         if (points.isEmpty()) return noTrade("数据积累中")
         val f = features(points, indexPoints, prevClose, nowMillis)
         when (f.phase) {
-            MarketPhase.EARLY -> return noTrade("数据积累中")
+            MarketPhase.EARLY -> return noTrade("数据积累中（约10:00后出信号）")
             MarketPhase.LUNCH -> return noTrade("午间休市")
-            MarketPhase.AFTERNOON_START -> return noTrade("数据积累中")
+            MarketPhase.AFTERNOON_START -> return noTrade("数据积累中（约13:30后出信号）")
             MarketPhase.CLOSED -> return noTrade("已收盘")
             else -> {}
         }

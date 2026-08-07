@@ -35,6 +35,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PieChart
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -96,13 +97,17 @@ import com.example.stocktracker.FeeConfig
 import com.example.stocktracker.FeeConfigStore
 import com.example.stocktracker.IntradayAction
 import com.example.stocktracker.IntradaySignal
+import com.example.stocktracker.AppNotification
 import com.example.stocktracker.MinutePoint
+import com.example.stocktracker.NotificationKind
+import com.example.stocktracker.NotificationLogStore
 import com.example.stocktracker.OverviewEntry
 import com.example.stocktracker.OverviewTab
 import com.example.stocktracker.PredictionEngine
 import com.example.stocktracker.PredictionOutcome
 import com.example.stocktracker.PredictionViewModel
 import com.example.stocktracker.PrefsIntradaySignalStore
+import com.example.stocktracker.PrefsNotificationLogStore
 import com.example.stocktracker.PrefsSnapshotStore
 import com.example.stocktracker.QuoteResult
 import com.example.stocktracker.PrefsStorage
@@ -142,6 +147,7 @@ fun StockApp() {
         StockViewModel(PrefsStorage(context), feeStore = FeeConfigStore(context))
     }
     val settingsStore = remember { SettingsStore(context) }
+    val notifLogStore = remember { PrefsNotificationLogStore(context) }
     var themePref by remember { mutableStateOf(settingsStore.loadTheme()) }
     val versionName = remember {
         runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }
@@ -177,6 +183,7 @@ fun StockApp() {
     var showPriceDialog by remember { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<Pair<Int, String>?>(null) }
     var showOverview by remember { mutableStateOf(false) }
+    var showNotifications by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var showFeeSettings by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
@@ -229,6 +236,13 @@ fun StockApp() {
                         titleContentColor = MaterialTheme.colorScheme.onPrimary
                     ),
                     actions = {
+                        IconButton(onClick = { showNotifications = true }) {
+                            Icon(
+                                Icons.Default.Notifications,
+                                contentDescription = "通知历史",
+                                tint = MaterialTheme.colorScheme.onPrimary
+                            )
+                        }
                         IconButton(onClick = { showOverview = true }) {
                             Icon(
                                 Icons.Default.PieChart,
@@ -359,11 +373,19 @@ fun StockApp() {
         )
     }
 
+    if (showNotifications) {
+        NotificationLogDialog(
+            store = notifLogStore,
+            onDismiss = { showNotifications = false }
+        )
+    }
+
     if (showOverview) {
         OverviewDialog(
             accounts = state.accounts,
             predUi = predUi,
             onRefreshSignals = { predVm.refreshAll(state.accounts) },
+            onRefreshData = { vm.refreshAll() },
             onDismiss = { showOverview = false }
         )
     }
@@ -1096,13 +1118,15 @@ private fun IntradayDialog(
     )
 }
 
-/** 盘中择时信号横幅（等级 + 分数 + 原因；降级提示灰显） */
+/** 盘中择时信号横幅（等级 + 分数 + 原因；降级提示灰显；数据收集期显示为中性"收集中"） */
 @Composable
 private fun SignalBanner(signal: IntradaySignal) {
-    val actionColor = when (signal.action) {
-        IntradayAction.BUY -> UpColor
-        IntradayAction.SELL -> DownColor
-        IntradayAction.HOLD -> MaterialTheme.colorScheme.primary
+    val pending = signal.pending
+    val actionColor = when {
+        pending != null -> MaterialTheme.colorScheme.primary
+        signal.action == IntradayAction.BUY -> UpColor
+        signal.action == IntradayAction.SELL -> DownColor
+        signal.action == IntradayAction.HOLD -> MaterialTheme.colorScheme.primary
         else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
     }
     Column(
@@ -1114,12 +1138,12 @@ private fun SignalBanner(signal: IntradaySignal) {
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = "${signal.action.label} ${String.format("%+.1f", signal.score)}",
+                text = pending ?: "${signal.action.label} ${String.format("%+.1f", signal.score)}",
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
                 color = actionColor
             )
-            if (signal.degraded) {
+            if (pending != null && signal.degraded) {
                 Spacer(Modifier.width(8.dp))
                 Text("信号降级", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
             }
@@ -1233,6 +1257,7 @@ private fun OverviewDialog(
     accounts: List<StockAccount>,
     predUi: PredictionViewModel.UiState,
     onRefreshSignals: () -> Unit,
+    onRefreshData: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val dataTabs = OverviewTab.entries.toList()
@@ -1240,6 +1265,8 @@ private fun OverviewDialog(
     var selected by remember { mutableStateOf(0) }
     val isPredict = selected >= dataTabs.size
     val dataTab = if (!isPredict) dataTabs[selected] else null
+    val scope = rememberCoroutineScope()
+    var dataRefreshing by remember { mutableStateOf(false) }
     // 按 |值| 从大到小排序展示（市值即按大小，浮盈/已实现按绝对值）
     val entries = remember(accounts, dataTab) {
         if (dataTab == null) emptyList()
@@ -1267,6 +1294,22 @@ private fun OverviewDialog(
             Column(Modifier.padding(16.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text("账户总览", fontWeight = FontWeight.Bold, fontSize = 16.sp, modifier = Modifier.weight(1f))
+                    // 每个标签均配刷新按钮：浮盈/市值/已实现 → 拉取全部现价重算；盘中信号 → 重算信号
+                    TextButton(onClick = {
+                        if (isPredict) {
+                            onRefreshSignals()
+                        } else {
+                            dataRefreshing = true
+                            onRefreshData()
+                            scope.launch { delay(1200); dataRefreshing = false }
+                        }
+                    }) {
+                        Text(
+                            if (isPredict) (if (predUi.running) "刷新中…" else "刷新")
+                            else (if (dataRefreshing) "刷新中…" else "刷新"),
+                            fontSize = 12.sp
+                        )
+                    }
                     IconButton(onClick = onDismiss) {
                         Icon(Icons.Default.Close, contentDescription = "关闭")
                     }
@@ -1340,12 +1383,13 @@ private fun PredictionPanel(predUi: PredictionViewModel.UiState, onRefresh: () -
                             HintText("获取失败")
                         } else {
                             Text(
-                                "${sig.action.label} ${String.format("%+.1f", sig.score)}",
+                                sig.pending ?: "${sig.action.label} ${String.format("%+.1f", sig.score)}",
                                 fontSize = 13.sp, fontWeight = FontWeight.Bold,
-                                color = when (sig.action) {
-                                    IntradayAction.BUY -> UpColor
-                                    IntradayAction.SELL -> DownColor
-                                    IntradayAction.HOLD -> MaterialTheme.colorScheme.primary
+                                color = when {
+                                    sig.pending != null -> MaterialTheme.colorScheme.primary
+                                    sig.action == IntradayAction.BUY -> UpColor
+                                    sig.action == IntradayAction.SELL -> DownColor
+                                    sig.action == IntradayAction.HOLD -> MaterialTheme.colorScheme.primary
                                     else -> MaterialTheme.colorScheme.onSurface
                                 }
                             )
@@ -1441,6 +1485,93 @@ private fun OverviewLegendRow(e: OverviewEntry, tab: OverviewTab, total: Double,
         )
         Spacer(Modifier.width(8.dp))
         Text(String.format("%.1f%%", pct), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+    }
+}
+
+// ---------------- 通知历史弹窗（右上角铃铛，竞价预测 + 盘中信号落盘记录） ----------------
+@Composable
+private fun NotificationLogDialog(store: NotificationLogStore, onDismiss: () -> Unit) {
+    var entries by remember { mutableStateOf(store.load()) }
+    var showClearConfirm by remember { mutableStateOf(false) }
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 620.dp)
+        ) {
+            Column(Modifier.padding(16.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("通知历史", fontWeight = FontWeight.Bold, fontSize = 16.sp, modifier = Modifier.weight(1f))
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "关闭")
+                    }
+                }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("共 ${entries.size} 条", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                    Spacer(Modifier.weight(1f))
+                    TextButton(
+                        onClick = { showClearConfirm = true },
+                        enabled = entries.isNotEmpty()
+                    ) { Text("清空", fontSize = 12.sp, color = MaterialTheme.colorScheme.error) }
+                }
+                HorizontalDivider()
+                if (entries.isEmpty()) {
+                    Spacer(Modifier.height(24.dp))
+                    EmptyText("暂无通知记录")
+                } else {
+                    LazyColumn(Modifier.heightIn(max = 480.dp)) {
+                        items(entries) { n ->
+                            NotificationRow(n)
+                            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (showClearConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearConfirm = false },
+            title = { Text("清空通知") },
+            text = { Text("确定要清空全部 ${entries.size} 条通知历史吗？此操作不可恢复。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    store.clear()
+                    entries = emptyList()
+                    showClearConfirm = false
+                }) { Text("清空", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { showClearConfirm = false }) { Text("取消") } }
+        )
+    }
+}
+
+@Composable
+private fun NotificationRow(n: AppNotification) {
+    val badgeColor = when (n.kind) {
+        NotificationKind.AUCTION -> MaterialTheme.colorScheme.primary
+        NotificationKind.INTRADAY -> Color(0xFF00897B)
+    }
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier
+                .background(badgeColor, RoundedCornerShape(4.dp))
+                .padding(horizontal = 6.dp, vertical = 2.dp)
+        ) {
+            Text(n.kind.label, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White)
+        }
+        Spacer(Modifier.width(8.dp))
+        Column(Modifier.weight(1f)) {
+            Text(n.title, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            Text(n.body, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+        }
+        Spacer(Modifier.width(6.dp))
+        Text(formatTime(n.timeMs), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f))
     }
 }
 

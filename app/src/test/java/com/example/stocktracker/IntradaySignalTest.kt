@@ -2,6 +2,7 @@ package com.example.stocktracker
 
 import java.util.Calendar
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -34,22 +35,31 @@ class IntradaySignalTest {
 
     private val flatIndex: List<MinutePoint> = series(List(60) { 100.0 })
 
-    /** 1. 分钟点 < 40 → NO_TRADE 数据积累中 */
+    /** 1. 分钟点 < 30 → NO_TRADE 数据积累中（pending） */
     @Test
     fun 数据不足_不给信号() {
-        val pts = series(List(30) { 10.0 + it * 0.1 }) // 巨涨也不给信号
+        val pts = series(List(29) { 10.0 + it * 0.1 }) // 巨涨也不给信号
         val s = IntradaySignalEvaluator.evaluate(pts, flatIndex, 10.0, false)
         assertEquals(IntradayAction.NO_TRADE, s.action)
         assertTrue(s.reasons.any { it.contains("数据积累中") })
+        assertNotNull(s.pending) // 未就绪：非真实"不交易"，UI 显示"收集中"
     }
 
-    /** 2. 开盘 30 分钟内（位置 < 40）→ NO_TRADE 数据积累中 */
+    /** 2. 开盘 30 分钟内（位置 < 30）→ NO_TRADE 数据积累中（pending）；恰好满 30 点起可出信号 */
     @Test
-    fun 开盘30分钟内不给信号() {
-        val pts = series(List(39) { 10.0 + it * 0.05 })
+    fun 开盘收集期内不给信号() {
+        val pts = series(List(29) { 10.0 + it * 0.05 })
         val s = IntradaySignalEvaluator.evaluate(pts, flatIndex, 10.0, false)
         assertEquals(IntradayAction.NO_TRADE, s.action)
         assertTrue(s.reasons.any { it.contains("数据积累中") })
+        assertNotNull(s.pending)
+
+        // v13：EARLY_POS 由 40 收至 30 —— 位置 30（约 10:00 起）mom30 就绪，不再停留在"收集"，正常进入决策
+        val ready = IntradaySignalEvaluator.evaluate(
+            series(List(31) { 10.0 + it * 0.0025 }, avgPct = -0.4), flatIndex, 10.0, false
+        )
+        assertNull(ready.pending)
+        assertNotEquals(IntradayAction.NO_TRADE, ready.action)
     }
 
     /** 3. 午后 13:00–13:30（位置 121~150，mom30 跨午休）→ NO_TRADE 数据积累中 */

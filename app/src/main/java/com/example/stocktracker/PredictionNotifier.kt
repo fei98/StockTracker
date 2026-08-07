@@ -26,6 +26,22 @@ object PredictionNotifier {
 
     fun post(context: Context, results: List<PredictionResult>) {
         if (results.isEmpty()) return
+        // v13：竞价预测通知同步落盘到应用内历史（右上角铃铛可回看）
+        runCatching {
+            val store = PrefsNotificationLogStore(context)
+            val now = System.currentTimeMillis()
+            results.forEach { r ->
+                store.add(
+                    AppNotification(
+                        timeMs = now,
+                        kind = NotificationKind.AUCTION,
+                        stock = r.stockName,
+                        title = "${r.stockName} ${r.conclusion.label}",
+                        body = "评分 ${formatScore(r.score)}，置信 ${r.confidence} · ${r.suggestion}"
+                    )
+                )
+            }
+        }
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
