@@ -34,6 +34,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -61,6 +62,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -90,6 +92,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
@@ -97,6 +100,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -142,6 +146,16 @@ import com.example.stocktracker.ThemePreference
 import com.example.stocktracker.TradeType
 import com.example.stocktracker.UpdateChecker
 import com.example.stocktracker.overviewEntries
+import com.example.stocktracker.sellableNote
+import com.example.stocktracker.realizedEntriesInRange
+import com.example.stocktracker.realizedRangeLabel
+import com.example.stocktracker.realizedDayTotalsInMonth
+import com.example.stocktracker.realizedMonthTotals
+import com.example.stocktracker.realizedYearTotals
+import com.example.stocktracker.daysInMonth
+import com.example.stocktracker.RealizedRange
+import com.example.stocktracker.dayLabel
+import java.util.Calendar
 import com.example.stocktracker.sellableNote
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -1138,10 +1152,24 @@ private fun TradeRow(t: com.example.stocktracker.TradeRecord, cleared: Boolean =
                 Spacer(Modifier.width(8.dp))
                 Text("¥${formatPrice(t.price)} × ${t.qty}股", fontWeight = FontWeight.Medium, color = dim)
             }
-            Text(
-                "${formatTime(t.time)} · 成本 ¥${formatMoney(t.cost)}",
-                fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (cleared) 0.25f else 0.5f)
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                val label = dayLabel(t.time)
+                if (label != null) {
+                    Text(
+                        label,
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f), RoundedCornerShape(4.dp))
+                            .padding(horizontal = 4.dp, vertical = 1.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                }
+                Text(
+                    "${formatTime(t.time)} · 成本 ¥${formatMoney(t.cost)}",
+                    fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (cleared) 0.25f else 0.5f)
+                )
+            }
             if (cleared) {
                 Text(
                     "已清仓",
@@ -1611,6 +1639,9 @@ private fun NotificationLogContent(store: NotificationLogStore) {
     }
 }
 
+/** 已实现统计粒度：月 / 日 / 年 */
+private enum class RealizedGranularity { MONTH, DAY, YEAR }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun OverviewScreen(
@@ -1620,16 +1651,36 @@ private fun OverviewScreen(
     onRefreshSignals: () -> Unit,
     onRefreshData: () -> Unit
 ) {
-    val dataTabs = OverviewTab.entries.toList()
-    val tabLabels = dataTabs.map { it.label } + "盘中信号"
+    // 标签顺序：浮盈 → 盘中信号 → 已实现 → 市值 → 股数（null 表示盘中信号）
+    val tabEntries: List<OverviewTab?> = listOf(
+        OverviewTab.FLOAT,
+        null,
+        OverviewTab.REALIZED,
+        OverviewTab.VALUE,
+        OverviewTab.SHARES
+    )
+    val tabLabels = tabEntries.map { it?.label ?: "盘中信号" }
     var selected by remember { mutableStateOf(0) }
-    val isPredict = selected >= dataTabs.size
-    val dataTab = if (!isPredict) dataTabs[selected] else null
+    val isPredict = tabEntries.getOrNull(selected) == null
+    val dataTab = if (!isPredict) tabEntries[selected] else null
     val scope = rememberCoroutineScope()
     var dataRefreshing by remember { mutableStateOf(false) }
+    // 已实现标签的时间统计：日/月/年三档各自独立记忆，切换不丢已选值
+    var realizedGran by remember { mutableStateOf(RealizedGranularity.MONTH) }
+    var monthRange by remember { mutableStateOf<RealizedRange>(RealizedRange.ThisMonth) }
+    var dayRange by remember { mutableStateOf<RealizedRange>(RealizedRange.Day(System.currentTimeMillis())) }
+    var yearRange by remember { mutableStateOf<RealizedRange>(RealizedRange.Year(Calendar.getInstance().get(Calendar.YEAR))) }
+    // 当前生效区间
+    val realizedRange = when (realizedGran) {
+        RealizedGranularity.MONTH -> monthRange
+        RealizedGranularity.DAY -> dayRange
+        RealizedGranularity.YEAR -> yearRange
+    }
     // 按 |值| 从大到小排序展示（市值即按大小，浮盈/已实现按绝对值）
-    val entries = remember(accounts, dataTab) {
+    val entries = remember(accounts, dataTab, realizedRange) {
         if (dataTab == null) emptyList()
+        else if (dataTab == OverviewTab.REALIZED) realizedEntriesInRange(accounts, realizedRange)
+            .sortedByDescending { kotlin.math.abs(it.value) }
         else overviewEntries(accounts, dataTab).sortedByDescending { kotlin.math.abs(it.value) }
     }
     val sellableNotes = remember(accounts) { accounts.associate { it.stock.name to sellableNote(it) } }
@@ -1667,7 +1718,7 @@ private fun OverviewScreen(
                             Modifier
                                 .clickable {
                                     selected = i
-                                    if (i >= dataTabs.size) onRefreshSignals()
+                                    if (tabEntries.getOrNull(i) == null) onRefreshSignals()
                                 }
                                 .padding(horizontal = 14.dp, vertical = 12.dp)
                         ) {
@@ -1711,6 +1762,7 @@ private fun OverviewScreen(
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
                 if (isPredict) "盘中信号（每 30 秒自动刷新）"
+                else if (dataTab == OverviewTab.REALIZED) "已实现 · ${realizedRangeLabel(realizedRange)}"
                 else "${dataTab?.label}（按持仓占比）",
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
@@ -1732,18 +1784,284 @@ private fun OverviewScreen(
                 )
             }
         }
+        // 已实现标签：日收益 / 月收益 / 年收益（chip 只切换视图，选择器常驻于饼图上方）
+        if (dataTab == OverviewTab.REALIZED) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                FilterChip(
+                    selected = realizedGran == RealizedGranularity.DAY,
+                    onClick = { realizedGran = RealizedGranularity.DAY },
+                    label = { Text("日收益", fontSize = 12.sp) }
+                )
+                FilterChip(
+                    selected = realizedGran == RealizedGranularity.MONTH,
+                    onClick = { realizedGran = RealizedGranularity.MONTH },
+                    label = { Text("月收益", fontSize = 12.sp) }
+                )
+                FilterChip(
+                    selected = realizedGran == RealizedGranularity.YEAR,
+                    onClick = { realizedGran = RealizedGranularity.YEAR },
+                    label = { Text("年收益", fontSize = 12.sp) }
+                )
+            }
+        }
         if (isPredict) {
             PredictionPanel(predUi)
         } else if (accounts.isEmpty()) {
             EmptyText("暂无股票数据")
         } else {
-            DonutChart(entries, dataTab!!, total)
-            HorizontalDivider()
-            LazyColumn {
-                items(entries) { e ->
+            // 数据区整体可滚动：选择器/日历 + 总收益 + 饼图 + 图例一屏放不下时可下滑
+            Column(
+                Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // 已实现：常驻选择器（按粒度内联展示）+ 该期总收益大数字 + 各股票收益饼状图
+                if (dataTab == OverviewTab.REALIZED) {
+                    RealizedRangeSelector(
+                        accounts = accounts,
+                        granularity = realizedGran,
+                        monthRange = monthRange,
+                        dayRange = dayRange,
+                        yearRange = yearRange,
+                        onMonth = { monthRange = it },
+                        onDay = { dayRange = it },
+                        onYear = { yearRange = it }
+                    )
+                    val signedTotal = entries.sumOf { it.value }
+                    Text(
+                        signedMoney(signedTotal),
+                        fontSize = 26.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = pnlColor(signedTotal),
+                        modifier = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.Center
+                    )
+                }
+                DonutChart(entries, dataTab!!, total)
+                HorizontalDivider()
+                // 已实现区间内无任何卖出记录时的空提示
+                if (dataTab == OverviewTab.REALIZED && entries.all { it.value == 0.0 }) {
+                    Text(
+                        "该时间段暂无卖出记录",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+                }
+                // 图例（非 lazy，股票数有限；外层已整体可滚动）
+                entries.forEach { e ->
                     // 仅浮盈为正的浮盈 tab 需要可卖提示；其余标签一律不标记
                     val note = if (dataTab == OverviewTab.FLOAT && e.value > 0.0001) sellableNotes[e.name] else null
                     OverviewLegendRow(e, dataTab, total, entries.indexOf(e), sellableNote = note)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RealizedRangeSelector(
+    accounts: List<StockAccount>,
+    granularity: RealizedGranularity,
+    monthRange: RealizedRange,
+    dayRange: RealizedRange,
+    yearRange: RealizedRange,
+    onMonth: (RealizedRange) -> Unit,
+    onDay: (RealizedRange) -> Unit,
+    onYear: (RealizedRange) -> Unit
+) {
+    when (granularity) {
+        RealizedGranularity.MONTH -> {
+            val months = remember(accounts) { realizedMonthTotals(accounts) }
+            LazyColumn(Modifier.heightIn(max = 200.dp)) {
+                items(months) { (y, m, value) ->
+                    val selected = (monthRange is RealizedRange.Month &&
+                        (monthRange as RealizedRange.Month).year == y &&
+                        (monthRange as RealizedRange.Month).month == m)
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { onMonth(RealizedRange.Month(y, m)) }
+                            .padding(vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "$y 年 $m 月",
+                            fontSize = 14.sp,
+                            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            signedMoney(value),
+                            fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                            color = if (value > 0.0001) UpColor else if (value < -0.0001) DownColor else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                        )
+                    }
+                }
+            }
+        }
+        RealizedGranularity.YEAR -> {
+            val years = remember(accounts) { realizedYearTotals(accounts) }
+            LazyColumn(Modifier.heightIn(max = 200.dp)) {
+                items(years) { (y, value) ->
+                    val selected = (yearRange as? RealizedRange.Year)?.year == y
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { onYear(RealizedRange.Year(y)) }
+                            .padding(vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "$y 年",
+                            fontSize = 14.sp,
+                            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            signedMoney(value),
+                            fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                            color = if (value > 0.0001) UpColor else if (value < -0.0001) DownColor else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                        )
+                    }
+                }
+            }
+        }
+        RealizedGranularity.DAY -> {
+            val nowCal = Calendar.getInstance()
+            val selCal = (dayRange as? RealizedRange.Day)?.dateMillis?.let { Calendar.getInstance().apply { timeInMillis = it } }
+            var displayYear by remember { mutableStateOf(selCal?.get(Calendar.YEAR) ?: nowCal.get(Calendar.YEAR)) }
+            var displayMonth by remember { mutableStateOf((selCal?.get(Calendar.MONTH) ?: nowCal.get(Calendar.MONTH)) + 1) }
+            val dayTotals = remember(accounts, displayYear, displayMonth) {
+                realizedDayTotalsInMonth(accounts, displayYear, displayMonth)
+            }
+            val firstCal = Calendar.getInstance().apply {
+                set(Calendar.YEAR, displayYear)
+                set(Calendar.MONTH, displayMonth - 1)
+                set(Calendar.DAY_OF_MONTH, 1)
+            }
+            val firstWeekday = firstCal.get(Calendar.DAY_OF_WEEK) // 1=周日 .. 7=周六
+            val leading = (firstWeekday + 5) % 7                    // 周一开头需要的空位
+            val daysInM = daysInMonth(displayYear, displayMonth)
+            // 今天（用于隐藏未来天数、禁用翻到未来、今日按钮）
+            val todayCal = Calendar.getInstance()
+            val todayY = todayCal.get(Calendar.YEAR)
+            val todayM = todayCal.get(Calendar.MONTH) + 1
+            val todayD = todayCal.get(Calendar.DAY_OF_MONTH)
+            val canGoNext = displayYear < todayY || (displayYear == todayY && displayMonth < todayM)
+            Column {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = {
+                        displayMonth--
+                        if (displayMonth == 0) {
+                            displayMonth = 12
+                            displayYear--
+                        }
+                    }) { Text("◀") }
+                    Text("$displayYear 年 $displayMonth 月", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f), textAlign = TextAlign.Center)
+                    TextButton(
+                        onClick = {
+                            displayMonth++
+                            if (displayMonth == 13) {
+                                displayMonth = 1
+                                displayYear++
+                            }
+                        },
+                        enabled = canGoNext
+                    ) { Text("▶") }
+                }
+                Row(Modifier.fillMaxWidth()) {
+                    listOf("一", "二", "三", "四", "五", "六", "日").forEach { w ->
+                        Text(
+                            w, fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                            modifier = Modifier.weight(1f),
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                // 日期网格：周一开头，空位补全；未来日期不展示（空位）
+                val totalCells = leading + daysInM
+                val rows = (totalCells + 6) / 7
+                (0 until rows).forEach { r ->
+                    Row(Modifier.fillMaxWidth()) {
+                        (0 until 7).forEach { c ->
+                            val idx = r * 7 + c
+                            val day = idx - leading + 1
+                            val isFuture = displayYear > todayY || (displayYear == todayY && (displayMonth > todayM || (displayMonth == todayM && day > todayD)))
+                            if (day in 1..daysInM && !isFuture) {
+                                val value = dayTotals[day - 1]
+                                val isSelected = (dayRange as? RealizedRange.Day)?.let { sel ->
+                                    val sc = Calendar.getInstance().apply { timeInMillis = sel.dateMillis }
+                                    sc.get(Calendar.YEAR) == displayYear && sc.get(Calendar.MONTH) + 1 == displayMonth && sc.get(Calendar.DAY_OF_MONTH) == day
+                                } ?: false
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f) else Color.Transparent)
+                                        .clickable {
+                                            val cal = Calendar.getInstance().apply {
+                                                set(Calendar.YEAR, displayYear)
+                                                set(Calendar.MONTH, displayMonth - 1)
+                                                set(Calendar.DAY_OF_MONTH, day)
+                                                set(Calendar.HOUR_OF_DAY, 12)
+                                                set(Calendar.MINUTE, 0)
+                                                set(Calendar.SECOND, 0)
+                                                set(Calendar.MILLISECOND, 0)
+                                            }
+                                            onDay(RealizedRange.Day(cal.timeInMillis))
+                                        }
+                                        .padding(vertical = 4.dp)
+                                ) {
+                                    Text(day.toString(), fontSize = 11.sp)
+                                    Text(
+                                        signedMoney(value),
+                                        fontSize = 9.sp,
+                                        color = if (value > 0.0001) UpColor else if (value < -0.0001) DownColor else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                                    )
+                                }
+                            } else {
+                                Spacer(Modifier.weight(1f))
+                            }
+                        }
+                    }
+                }
+                // 右下角「今日」圆形按钮：一键跳回今天并选中今日
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                    Surface(
+                        onClick = {
+                            displayYear = todayY
+                            displayMonth = todayM
+                            val cal = Calendar.getInstance().apply {
+                                set(Calendar.YEAR, todayY)
+                                set(Calendar.MONTH, todayM - 1)
+                                set(Calendar.DAY_OF_MONTH, todayD)
+                                set(Calendar.HOUR_OF_DAY, 12)
+                                set(Calendar.MINUTE, 0)
+                                set(Calendar.SECOND, 0)
+                                set(Calendar.MILLISECOND, 0)
+                            }
+                            onDay(RealizedRange.Day(cal.timeInMillis))
+                        },
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.4f))
+                    ) {
+                        Text(
+                            "今日",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                        )
+                    }
                 }
             }
         }
@@ -1845,6 +2163,9 @@ private fun DonutChart(entries: List<OverviewEntry>, tab: OverviewTab, total: Do
     Box(Modifier.fillMaxWidth().padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
         Canvas(Modifier.size(170.dp)) {
             val stroke = 34.dp.toPx()
+            // 弧线内缩半个描边宽度，保证描边完整落在画布内（外层滚动裁剪时不会被削顶）
+            val inset = stroke / 2
+            val arcSize = Size(size.width - stroke, size.height - stroke)
             var start = -90f
             val nonZero = entries.filter { it.value != 0.0 }
             if (total > 0 && nonZero.isNotEmpty()) {
@@ -1855,6 +2176,8 @@ private fun DonutChart(entries: List<OverviewEntry>, tab: OverviewTab, total: Do
                         startAngle = start,
                         sweepAngle = (sweep - 1.5f).coerceAtLeast(0f),
                         useCenter = false,
+                        topLeft = Offset(inset, inset),
+                        size = arcSize,
                         style = Stroke(width = stroke)
                     )
                     start += sweep

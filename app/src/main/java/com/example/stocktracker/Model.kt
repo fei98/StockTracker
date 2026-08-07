@@ -27,6 +27,16 @@ fun isSameDay(a: Long, b: Long): Boolean {
         ca.get(Calendar.DAY_OF_YEAR) == cb.get(Calendar.DAY_OF_YEAR)
 }
 
+/** 交易时间相对"今天"的相对标记：今天 / 昨天 / 其他返回 null（纯函数，可单测） */
+fun dayLabel(time: Long, now: Long = System.currentTimeMillis()): String? {
+    if (isSameDay(time, now)) return "今天"
+    val yesterday = Calendar.getInstance().apply {
+        timeInMillis = now
+        add(Calendar.DAY_OF_YEAR, -1)
+    }
+    return if (isSameDay(time, yesterday.timeInMillis)) "昨天" else null
+}
+
 /**
  * 交易记录（用于历史展示）
  * @param fee 本次手续费：买入 = 买入费；卖出 = 卖出费（佣金+印花税+过户费）
