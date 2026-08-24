@@ -289,7 +289,11 @@ fun StockApp() {
                     accounts = state.accounts,
                     weekUi = weekUi,
                     onRefreshTrends = { weekVm.refreshAll(state.accounts) },
-                    onRefreshData = { vm.refreshAll() }
+                    onRefreshData = { vm.refreshAll() },
+                    onOpenStock = { idx ->
+                        vm.selectStock(idx)
+                        selectedTab = 0
+                    }
                 )
                 2 -> MineScreen(
                     padding = padding,
@@ -1611,7 +1615,8 @@ private fun OverviewScreen(
     accounts: List<StockAccount>,
     weekUi: WeeklyTrendViewModel.UiState,
     onRefreshTrends: () -> Unit,
-    onRefreshData: () -> Unit
+    onRefreshData: () -> Unit,
+    onOpenStock: (Int) -> Unit
 ) {
     // 标签顺序：浮盈 → 周趋势 → 已实现 → 市值 → 股数（null 表示周趋势）
     val tabEntries: List<OverviewTab?> = listOf(
@@ -1820,7 +1825,14 @@ private fun OverviewScreen(
                     OverviewLegendRow(
                         e, dataTab, total, entries.indexOf(e),
                         sellableNote = note,
-                        floatPct = if (dataTab == OverviewTab.FLOAT) dayChangeByStock[e.name] else null
+                        floatPct = if (dataTab == OverviewTab.FLOAT) dayChangeByStock[e.name] else null,
+                        // 浮盈 tab：点击跳转到首页该股票的详情
+                        onClick = if (dataTab == OverviewTab.FLOAT) {
+                            {
+                                val idx = accounts.indexOfFirst { it.stock.name == e.name }
+                                if (idx >= 0) onOpenStock(idx)
+                            }
+                        } else null
                     )
                 }
             }
@@ -2167,11 +2179,15 @@ private fun OverviewLegendRow(
     total: Double,
     index: Int,
     sellableNote: String? = null,
-    floatPct: Double? = null
+    floatPct: Double? = null,
+    onClick: (() -> Unit)? = null
 ) {
     val color = overviewColor(e, tab, index)
     Row(
-        Modifier.fillMaxWidth().padding(vertical = 5.dp),
+        Modifier
+            .fillMaxWidth()
+            .clickable(enabled = onClick != null) { onClick?.invoke() }
+            .padding(vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(Modifier.size(10.dp).background(color, RoundedCornerShape(2.dp)))
@@ -2224,6 +2240,16 @@ private fun OverviewLegendRow(
         } else {
             val pct = if (total > 0) kotlin.math.abs(e.value) / total * 100 else 0.0
             Text(String.format("%.1f%%", pct), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+        }
+        // 可点击跳转提示：行尾右箭头，暗示"点击查看首页详情"
+        if (onClick != null) {
+            Spacer(Modifier.width(2.dp))
+            Icon(
+                Icons.Default.KeyboardArrowRight,
+                contentDescription = "点击查看详情",
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
+            )
         }
     }
 }
