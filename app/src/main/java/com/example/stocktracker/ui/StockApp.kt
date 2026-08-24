@@ -1143,6 +1143,7 @@ private fun LotRow(lp: com.example.stocktracker.LotPnl, currentPrice: Double?) {
 @Composable
 private fun HistoryPreviewCard(trades: List<com.example.stocktracker.TradeRecord>, onUndo: () -> Unit) {
     var expanded by remember { mutableStateOf(false) }
+    var showUndoConfirm by remember { mutableStateOf(false) }
     val clearedIds = remember(trades) { clearedTradeIds(trades) }
     SectionCard(title = "交易记录") {
         if (trades.isEmpty()) {
@@ -1161,10 +1162,37 @@ private fun HistoryPreviewCard(trades: List<com.example.stocktracker.TradeRecord
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
             TextButton(
-                onClick = onUndo,
+                onClick = { showUndoConfirm = true },
                 modifier = Modifier.fillMaxWidth()
             ) { Text("撤销最后一笔交易", fontSize = 12.sp, color = MaterialTheme.colorScheme.error) }
         }
+    }
+    // 撤销二次确认：防误触（撤销不可逆）
+    if (showUndoConfirm) {
+        val last = trades.lastOrNull()
+        val typeLabel = when (last?.type) {
+            TradeType.BUY -> "买入"
+            TradeType.SELL -> "卖出"
+            else -> "交易"
+        }
+        AlertDialog(
+            onDismissRequest = { showUndoConfirm = false },
+            title = { Text("撤销$typeLabel") },
+            text = {
+                Text(
+                    "确定要撤销最后一笔${last?.let { "${formatPrice(it.price)} 元 × ${it.qty} 股" } ?: ""}吗？此操作不可恢复。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showUndoConfirm = false
+                    onUndo()
+                }) { Text("撤销", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showUndoConfirm = false }) { Text("取消") }
+            }
+        )
     }
 }
 
