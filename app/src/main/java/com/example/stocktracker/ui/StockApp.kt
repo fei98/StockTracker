@@ -143,6 +143,7 @@ import com.example.stocktracker.realizedMonthTotals
 import com.example.stocktracker.realizedYearTotals
 import com.example.stocktracker.daysInMonth
 import com.example.stocktracker.RealizedRange
+import com.example.stocktracker.allTradesSorted
 import com.example.stocktracker.dayLabel
 import java.util.Calendar
 import java.util.Locale
@@ -1646,11 +1647,12 @@ private fun OverviewScreen(
     onRefreshData: () -> Unit,
     onOpenStock: (Int) -> Unit
 ) {
-    // 标签顺序：浮盈 → 周趋势 → 已实现 → 市值 → 股数（null 表示周趋势）
+    // 标签顺序：浮盈 → 周趋势 → 已实现 → 交易 → 市值 → 股数（null 表示周趋势）
     val tabEntries: List<OverviewTab?> = listOf(
         OverviewTab.FLOAT,
         null,
         OverviewTab.REALIZED,
+        OverviewTab.TRADES,
         OverviewTab.VALUE,
         OverviewTab.SHARES
     )
@@ -1673,7 +1675,7 @@ private fun OverviewScreen(
     }
     // 按 |值| 从大到小排序展示（市值即按大小，浮盈/已实现按绝对值）
     val entries = remember(accounts, dataTab, realizedRange) {
-        if (dataTab == null) emptyList()
+        if (dataTab == null || dataTab == OverviewTab.TRADES) emptyList()
         else if (dataTab == OverviewTab.REALIZED) realizedEntriesInRange(accounts, realizedRange)
             .sortedByDescending { kotlin.math.abs(it.value) }
         else overviewEntries(accounts, dataTab).sortedByDescending { kotlin.math.abs(it.value) }
@@ -1756,6 +1758,7 @@ private fun OverviewScreen(
             Text(
                 if (isPredict) "周趋势预测（未来 5 个交易日）"
                 else if (dataTab == OverviewTab.REALIZED) "已实现 · ${realizedRangeLabel(realizedRange)}"
+                else if (dataTab == OverviewTab.TRADES) "全部交易记录（最新在上）"
                 else "${dataTab?.label}（按持仓占比）",
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
@@ -1803,6 +1806,8 @@ private fun OverviewScreen(
         }
         if (isPredict) {
             WeeklyTrendPanel(weekUi)
+        } else if (dataTab == OverviewTab.TRADES) {
+            if (accounts.isEmpty()) EmptyText("暂无股票数据") else TradesSummaryList(accounts, Modifier.weight(1f))
         } else if (accounts.isEmpty()) {
             EmptyText("暂无股票数据")
         } else {
@@ -1865,6 +1870,52 @@ private fun OverviewScreen(
                 }
             }
         }
+    }
+}
+
+/** 交易汇总：全部股票交易记录合并，按时间倒序（最新在上），每行显示股票名 + 交易详情 */
+@Composable
+private fun TradesSummaryList(accounts: List<StockAccount>, modifier: Modifier = Modifier) {
+    val all = remember(accounts) { allTradesSorted(accounts) }
+    if (all.isEmpty()) {
+        EmptyText("暂无交易记录")
+    } else {
+        LazyColumn(modifier) {
+            items(all) { (stock, t) ->
+                TradesSummaryRow(stock, t)
+                HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+            }
+        }
+    }
+}
+
+@Composable
+private fun TradesSummaryRow(stock: Stock, t: com.example.stocktracker.TradeRecord) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                stock.name,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                modifier = Modifier.weight(1f)
+            )
+            val label = dayLabel(t.time)
+            if (label != null) {
+                Text(
+                    label,
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                )
+            }
+        }
+        TradeRow(t)
     }
 }
 
