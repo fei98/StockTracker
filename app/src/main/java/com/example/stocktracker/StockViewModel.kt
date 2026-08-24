@@ -34,13 +34,9 @@ class StockViewModel(
     private val _intradayLoading = MutableStateFlow(false)
     val intradayLoading: StateFlow<Boolean> = _intradayLoading.asStateFlow()
 
-    /** 盘中择时信号（当前选中股票，随分时刷新实时更新） */
-    private val _signal = MutableStateFlow<IntradaySignal?>(null)
-    val signal: StateFlow<IntradaySignal?> = _signal.asStateFlow()
-
     private var intradayStockKey: String? = null
 
-    /** 加载当前选中股票的今日分时并计算盘中信号（切股后首次点分时重新拉取；force=true 强制刷新） */
+    /** 加载当前选中股票的今日分时（切股后首次点分时重新拉取；force=true 强制刷新） */
     fun loadIntraday(force: Boolean = false) {
         val acc = _state.value.selected ?: return
         val stock = acc.stock
@@ -48,25 +44,12 @@ class StockViewModel(
         if (!force && intradayStockKey == stock.marketCode) return // 已缓存该股
         _intradayLoading.value = true
         viewModelScope.launch {
-            // 指数与个股并发拉取（评审 §1.3⑧：原串行两次请求，信号滞后）
-            val index = async(Dispatchers.IO) { fetchIndexPoints(stock) }
             val data = withContext(Dispatchers.IO) { api.fetchIntraday(stock) }
             _intraday.value = data
             intradayStockKey = if (data != null) stock.marketCode else null
-            _signal.value = data?.let {
-                IntradaySignalEvaluator.evaluate(
-                    it, index.await(), acc.prevClose, acc.totalQty > 0, System.currentTimeMillis(),
-                    priceLimitPct = priceLimitPct(acc.stock),
-                    canSell = acc.sellableQty > 0
-                )
-            }
             _intradayLoading.value = false
         }
     }
-
-    /** 指数分钟线：进程级共享缓存（60 秒 TTL + 互斥去重），个股分钟照旧 10 秒刷新 */
-    private suspend fun fetchIndexPoints(stock: Stock): List<MinutePoint>? =
-        IndexMinuteCache.fetch(api, stock)
 
     private var nextId = 1L
     private var searchSeq = 0

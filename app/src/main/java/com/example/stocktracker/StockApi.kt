@@ -123,6 +123,65 @@ open class StockApi(
             client.newCall(req).execute().use { resp -> resp.body?.string() }
         }.getOrNull()
     }
+
+    /**
+     * 日K线（前复权 qfq），用于未来一周趋势预测与历史回测。
+     * 端点：web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={code},day,,,{count},qfq
+     */
+    open suspend fun fetchDailyKline(stock: Stock, count: Int = 300): List<DailyBar>? {
+        val raw = withContext(Dispatchers.IO) {
+            runCatching {
+                val req = Request.Builder()
+                    .url("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${stock.marketCode},day,,,$count,qfq")
+                    .build()
+                client.newCall(req).execute().use { resp -> resp.body?.string() }
+            }.getOrNull()
+        } ?: return null
+        return parseDailyKline(raw)
+    }
+}
+
+/**
+ * 解析日K线（腾讯 fqkline/get，纯字符串/正则，不依赖 org.json 便于单测）。
+ * 结构：data.{code}.qfqday = [["2026-08-17","11.200","11.100","11.220","11.070","929043.000"],...]
+ * 每行 = [日期, 开, 收, 高, 低, 量, ...]（日期升序，多余字段忽略，兼容 7 字段变体）。
+ */
+fun parseDailyKline(raw: String): List<DailyBar>? {
+    // 定位 qfqday 数组（按括号深度取整段，避免匹配到 qt/market 等其它数组），无则退回 day
+    val block = extractArray(raw, "qfqday") ?: extractArray(raw, "day") ?: return null
+    // 匹配以日期开头的行（字段数不限），取前 6 个字符串字段
+    val rows = Regex("\\[\"\\d{4}-\\d{2}-\\d{2}\"(?:\\s*,\\s*\"[^\"]*\"\\s*)*]")
+        .findAll(block)
+    val bars = rows.mapNotNull { m ->
+        val tokens = Regex("\"([^\"]*)\"").findAll(m.value).map { it.groupValues[1] }.toList()
+        if (tokens.size < 6) return@mapNotNull null
+        val open = tokens[1].toDoubleOrNull() ?: return@mapNotNull null
+        val close = tokens[2].toDoubleOrNull() ?: return@mapNotNull null
+        val high = tokens[3].toDoubleOrNull() ?: return@mapNotNull null
+        val low = tokens[4].toDoubleOrNull() ?: return@mapNotNull null
+        val vol = tokens[5].toDoubleOrNull() ?: return@mapNotNull null
+        DailyBar(tokens[0], open, close, high, low, vol.toLong())
+    }.toList()
+    return bars.takeIf { it.isNotEmpty() }
+}
+
+/** 取 JSON 对象里 key 对应的数组整段文本（按括号深度匹配外层闭合，兼容嵌套数组） */
+private fun extractArray(raw: String, key: String): String? {
+    val idx = raw.indexOf("\"$key\"")
+    if (idx < 0) return null
+    val start = raw.indexOf('[', idx)
+    if (start < 0) return null
+    var depth = 0
+    for (i in start until raw.length) {
+        when (raw[i]) {
+            '[' -> depth++
+            ']' -> {
+                depth--
+                if (depth == 0) return raw.substring(start, i + 1)
+            }
+        }
+    }
+    return null
 }
 
 /**

@@ -1,7 +1,59 @@
 # 模型修改记录（对应 MODEL_REVIEW.md 评审建议）
 
-> 本文件记录按评审报告建议所做的模型改动，与评审报告（MODEL_REVIEW.md / INTRADAY_SIGNAL_REVIEW.md）分开维护。
+> 本文件记录按评审报告建议所做的模型改动，与评审报告（MODEL_REVIEW.md / INTRADAY_SIGNAL_REVIEW.md / WEEKLY_TREND_REVIEW.md）分开维护。
 > **约定：最新改动放在最前面，旧改动依次下移。每一轮均对应代码与测试同步更新。**
+
+## v14.2 改动（2026-08-24：周趋势评审遗留修复）
+
+> 依据 `WEEKLY_TREND_REVIEW.md` v1 复核与代码评审，修复 3 处：非 A 股切股竞态、缓存线程安全、文档同步。
+
+1. **非 A 股切股竞态（评审问题 1）**：`WeeklyTrendViewModel.refresh()` 非 A 股分支未递增 `refreshSeq`，A 股慢请求在途时切到港股/美股，在途完成会照样回写，导致卡片标题/内容错位成 A 股预测。修复：非 A 股分支先 `refreshSeq++` 再置空返回。新增用例「切到非A股后慢请求不得覆盖」。
+2. **K线缓存线程安全（评审问题 2）**：`klineCache` 由普通 `mutableMapOf` 改 `java.util.concurrent.ConcurrentHashMap`，消除 `Dispatchers.Default`（refreshAll）与 `Dispatchers.IO`（refresh）并发读写的数据竞争。
+3. **文档/文案**：README 用例数同步（此前停留在 154 → 160）；`MarketData.indexCodeFor` 注释去掉旧"分钟"口径（改为"北交所/港美股无对应指数基准"）。
+
+## v14.1 改动（2026-08-24：周趋势模型缺陷修复）
+
+> 代码评审发现的 5 处问题全部修复，涉及特征计算正确性、并发安全、解析健壮性、线程模型。全量单测 159 例通过，`assembleDebug` 通过。
+
+1. **`streakOf` 连涨/连跌天数多算 1 天（回归）**：循环从 `k = i` 起重复检查了用于确定 `sign` 的那次比较，涨幅/跌幅天数恒比真实值大 1（旧 `PredictionEngine` 从 `size-2` 起循环）。修复：`for (k in i - 1 downTo 1)`。新增精确断言测试（单涨日=1、双涨日=2、连跌、涨后回调）。
+2. **切换股票竞态（`WeeklyTrendViewModel`）**：新增 `refreshSeq` 令牌，`refresh`/`refreshAll` 在途请求作废；`refresh` 加载期清空 `result`，避免"标题是 B、内容是 A"的错位展示与慢请求后到覆盖。新增 2 例 VM 竞态测试（FakeApi + gate 控制慢请求）。
+3. **`parseDailyKline` 宽容字段数**：行正则由固定 6 字段改为"日期开头 + 任意字符串字段"，取前 6 个；兼容腾讯接口 7 字段（含成交额）变体，不再静默丢整条 K 线。新增多字段解析测试。
+4. **`indexRS20` 按日期对齐**：由位置对齐 `indexBars[i]` 改为按 `bars[i].date` / `bars[i-20].date` 查指数收盘，个股停牌导致序列错位时不再比较不同日期；`hasIndexData` 同步改为按当日日期是否存在判定。新增停牌错位场景测试。
+5. **`refreshAll` 计算切后台**：`async(Dispatchers.Default)`，全部持仓刷新时预测计算不再占用主线程。
+
+## v14 改动（2026-08-24：未来一周趋势预测上线，盘中信号 + 竞价预测下线）
+
+> 对应 `WEEKLY_TREND_REVIEW.md` v1。开发者需求：盘中实时信号"买入即见顶"（`aboveAvg` 在日内高点取最大导致评分顶部最高），且竞价预测只答当日方向；改为**预测未来 5 个交易日方向**（A 股，日K qfq）。
+> 文档：`WEEKLY_TREND_PLAN.md`（方案）/ `WEEKLY_TREND_REVIEW.md`（评审）。旧文档 `MODEL_REVIEW.md`、`INTRADAY_SIGNAL_PLAN/REVIEW.md` 仅作历史存档。
+
+### 1. 新增周趋势模型（`WeeklyTrend.kt` 纯逻辑，无 Android 依赖）
+
+- **数据**：`StockApi.fetchDailyKline`（腾讯 fqkline/get，qfq 前复权，约 300 根/14 个月）+ `parseDailyKline`（括号深度取 qfqday 数组，正则解析）。
+- **特征**（只用 `[0,i]`）：ret5/20/60、ma20Dev/ma60Dev、ma20Slope、ma5vsMa20、rsi14、pctOffHigh20/60、volRatio(5/20)、volatility20、streak、indexRS20（指数缺失降级）。
+- **评分**：各特征滚动 120 窗口 z 标准化 → `2·tanh(z/scale)` 有界贡献加权；rsi/streak 不走 z。
+- **目标**：`close[i+5]/close[i]−1`，±1.0% 震荡带 → 看涨/看跌/震荡。
+- **标定**：walk-forward 前推（每折用前缀拟合 F1 阈值，严格 out-of-sample）、邻域命中率信心、时间衰减、方向命中率 + 平均前向收益回测。
+- **K线 <120 根** → 出"数据积累中"，不硬猜方向。
+
+### 2. 下线两套旧模型
+
+- **盘中实时信号**：删 `IntradaySignal.kt`/`IntradaySignalStore.kt`/`IndexMinuteCache.kt`/`PredictionViewModel.kt`；`StockViewModel` 去信号 StateFlow（保留分时图）；UI 去信号横幅与总览"盘中信号"标签。
+- **竞价预测**：删 `AuctionPredictor.kt`/`PredictionModel.kt`/`Calibration.kt`/`PredictionEngine.kt`/`PredictionWorkers.kt`/`PredictionNotifier.kt`/`SnapshotStore.kt`/`SectorLearner.kt`/`SectorResolver.kt`/`NotificationLog.kt`。
+- `MainActivity` 去除 Worker 调度与通知渠道；Manifest 去除 POST_NOTIFICATIONS；移除 `androidx.work` 依赖。
+- 删除 7 个相关测试；`MarketDataTest` 裁剪（保留行情/分时/指数映射测试）。
+
+### 3. UI
+
+- 首页预测卡 → "未来一周预测"（方向 + 分数 + 信心 + 关键原因 + 回测命中率/平均前向收益）。
+- 总览第 2 标签 → "周趋势"（全部持仓按分数排序，点击展开原因与回测）。
+- 移除铃铛/通知历史/"我的"通知页；分时弹窗仅保留图表。
+
+### 4. 测试与验证
+
+- 新增 `WeeklyTrendTest`（16 例：K线解析/特征/评分/目标/分类/walk-forward/信心/完整预测/A股判定）。
+- 全量 `testDebugUnitTest` 154 例通过；`assembleDebug` 通过。
+
+---
 
 ## v13 改动（2026-08-07：盘中门控调优 + 通知历史 + 总览刷新）
 

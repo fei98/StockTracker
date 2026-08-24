@@ -1,13 +1,10 @@
 package com.example.stocktracker.ui
 
-import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -48,7 +45,6 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PieChart
 import androidx.compose.material.icons.filled.Refresh
@@ -110,29 +106,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import androidx.compose.foundation.clickable
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.stocktracker.FeeConfig
 import com.example.stocktracker.FeeConfigStore
-import com.example.stocktracker.IntradayAction
-import com.example.stocktracker.IntradaySignal
-import com.example.stocktracker.AppNotification
 import com.example.stocktracker.MinutePoint
-import com.example.stocktracker.NotificationDetail
-import com.example.stocktracker.NotificationKind
-import com.example.stocktracker.NotificationLogStore
 import com.example.stocktracker.OverviewEntry
 import com.example.stocktracker.OverviewTab
-import com.example.stocktracker.PredictionEngine
-import com.example.stocktracker.PredictionOutcome
-import com.example.stocktracker.PredictionViewModel
-import com.example.stocktracker.PrefsIntradaySignalStore
-import com.example.stocktracker.PrefsNotificationLogStore
-import com.example.stocktracker.PrefsSnapshotStore
-import com.example.stocktracker.QuoteResult
 import com.example.stocktracker.PrefsStorage
+import com.example.stocktracker.QuoteResult
 import com.example.stocktracker.R
 import com.example.stocktracker.SettingsStore
 import com.example.stocktracker.Stock
@@ -140,11 +122,13 @@ import com.example.stocktracker.StockAccount
 import com.example.stocktracker.StockApi
 import com.example.stocktracker.StockState
 import com.example.stocktracker.StockViewModel
-import com.example.stocktracker.TargetType
-import com.example.stocktracker.TencentMarketDataApi
 import com.example.stocktracker.ThemePreference
 import com.example.stocktracker.TradeType
+import com.example.stocktracker.TrendOutcome
 import com.example.stocktracker.UpdateChecker
+import com.example.stocktracker.WeeklyTrendResult
+import com.example.stocktracker.WeeklyTrendViewModel
+import com.example.stocktracker.isAStock
 import com.example.stocktracker.overviewEntries
 import com.example.stocktracker.sellableNote
 import com.example.stocktracker.realizedEntriesInRange
@@ -156,6 +140,7 @@ import com.example.stocktracker.daysInMonth
 import com.example.stocktracker.RealizedRange
 import com.example.stocktracker.dayLabel
 import java.util.Calendar
+import java.util.Locale
 import com.example.stocktracker.sellableNote
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -169,8 +154,6 @@ import com.example.stocktracker.pctChangeFromAvgPrice
 import com.example.stocktracker.isSameDay
 import com.example.stocktracker.isValidCodeInput
 import com.example.stocktracker.minuteIndexOf
-import com.example.stocktracker.sortHoldingSignals
-import com.example.stocktracker.isFreezeBarredSell
 import com.example.stocktracker.ui.theme.DownColor
 import com.example.stocktracker.ui.theme.StockTrackerTheme
 import com.example.stocktracker.ui.theme.UpColor
@@ -180,16 +163,12 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun StockApp(
-    pendingDetail: NotificationDetail? = null,
-    onConsumeDetail: () -> Unit = {}
-) {
+fun StockApp() {
     val context = LocalContext.current
     val vm: StockViewModel = viewModel {
         StockViewModel(PrefsStorage(context), feeStore = FeeConfigStore(context))
     }
     val settingsStore = remember { SettingsStore(context) }
-    val notifLogStore = remember { PrefsNotificationLogStore(context) }
     var themePref by remember { mutableStateOf(settingsStore.loadTheme()) }
     val versionName = remember {
         runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }
@@ -202,21 +181,12 @@ fun StockApp(
     val signatureFingerprint = remember { signatureFingerprintOf(context) }
     val state by vm.state.collectAsStateWithLifecycle()
     val acc = state.selected
-    val predVm: PredictionViewModel = viewModel {
-        PredictionViewModel(signalStore = PrefsIntradaySignalStore(context))
-    }
-    val predUi by predVm.ui.collectAsStateWithLifecycle()
-    val predStock = acc?.stock
+    val weekVm: WeeklyTrendViewModel = viewModel { WeeklyTrendViewModel() }
+    val weekUi by weekVm.ui.collectAsStateWithLifecycle()
 
-    // 切换选中股票时刷新盘中信号；停留期间每 30 秒自动刷新
-    LaunchedEffect(predStock?.marketCode) {
-        val a = state.selected ?: return@LaunchedEffect
-        predVm.refresh(a.stock, a.prevClose, a.totalQty > 0, a.sellableQty > 0)
-        while (true) {
-            delay(30_000)
-            val cur = state.selected ?: break
-            predVm.refresh(cur.stock, cur.prevClose, cur.totalQty > 0, cur.sellableQty > 0)
-        }
+    // 切换选中股票时刷新一次周趋势（多日维度，无需 30 秒自动刷新）
+    LaunchedEffect(acc?.stock?.marketCode) {
+        acc?.let { weekVm.refresh(it.stock) }
     }
     val snackbar = remember { SnackbarHostState() }
     var showClearDialog by remember { mutableStateOf(false) }
@@ -233,7 +203,6 @@ fun StockApp(
     var showIntradayDialog by remember { mutableStateOf(false) }
     val intraday by vm.intraday.collectAsStateWithLifecycle()
     val intradayLoading by vm.intradayLoading.collectAsStateWithLifecycle()
-    val intradaySignal by vm.signal.collectAsStateWithLifecycle()
     var selectedTab by remember { mutableStateOf(0) } // 0 首页 / 1 总览 / 2 我的
     var minePage by remember { mutableStateOf(MinePage.MENU) }
     // 统一返回契约（覆盖整个 App 的所有"非根"层）：
@@ -241,18 +210,6 @@ fun StockApp(
     // 2. 未被那些界面接管时，这里兜底：总览/我的 tab 按返回回到首页 tab；首页 tab 才交给系统退出。
     // 后续新增"有上级/可返回"的界面时，在该界面内注册自己的 BackHandler 即可被本契约优先接管。
     BackHandler(enabled = selectedTab != 0) { selectedTab = 0 }
-
-    val notifLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { }
-    fun requestNotifPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
-    }
 
     LaunchedEffect(state.message) {
         state.message?.let { msg ->
@@ -289,18 +246,7 @@ fun StockApp(
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = MaterialTheme.colorScheme.primary,
                         titleContentColor = MaterialTheme.colorScheme.onPrimary
-                    ),
-                    actions = {
-                        if (selectedTab == 2) {
-                            IconButton(onClick = { minePage = MinePage.NOTIFICATIONS }) {
-                                Icon(
-                                    Icons.Default.Notifications,
-                                    contentDescription = "通知历史",
-                                    tint = MaterialTheme.colorScheme.onPrimary
-                                )
-                            }
-                        }
-                    }
+                    )
                 )
             },
             bottomBar = {
@@ -336,15 +282,14 @@ fun StockApp(
                 1 -> OverviewScreen(
                     padding = padding,
                     accounts = state.accounts,
-                    predUi = predUi,
-                    onRefreshSignals = { predVm.refreshAll(state.accounts) },
+                    weekUi = weekUi,
+                    onRefreshTrends = { weekVm.refreshAll(state.accounts) },
                     onRefreshData = { vm.refreshAll() }
                 )
                 2 -> MineScreen(
                     padding = padding,
                     page = minePage,
                     onPageChange = { minePage = it },
-                    notifLogStore = notifLogStore,
                     themePref = themePref,
                     onThemeChange = {
                         themePref = it
@@ -357,8 +302,7 @@ fun StockApp(
                     padding = padding,
                     state = state,
                     acc = acc,
-                    predStock = predStock,
-                    predUi = predUi,
+                    weekUi = weekUi,
                     onSelect = vm::selectStock,
                     onAdd = { showAddDialog = true },
                     onRefreshAll = vm::refreshAll,
@@ -368,8 +312,8 @@ fun StockApp(
                         vm.loadIntraday()
                         showIntradayDialog = true
                     },
-                    onRefreshSignal = {
-                        acc?.let { predVm.refresh(it.stock, it.prevClose, it.totalQty > 0, it.sellableQty > 0) }
+                    onRefreshTrend = {
+                        acc?.let { weekVm.refresh(it.stock, force = true) }
                     },
                     onTrade = { showTradeDialog = true },
                     onClear = { showClearDialog = true }
@@ -411,10 +355,6 @@ fun StockApp(
             },
             dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("取消") } }
         )
-    }
-
-    pendingDetail?.let { d ->
-        NotificationDetailDialog(detail = d, onDismiss = onConsumeDetail)
     }
 
     if (showFeeSettings) {
@@ -486,7 +426,6 @@ fun StockApp(
         IntradayDialog(
             points = intraday,
             loading = intradayLoading,
-            signal = intradaySignal,
             prevClose = acc.prevClose,
             stockName = acc.stock.name,
             buys = todayBuys,
@@ -676,10 +615,10 @@ private fun AddStockDialog(
     )
 }
 
-// ---------------- 竞价预测卡（紧凑：仅核心结论，详情进弹窗） ----------------
+// ---------------- 未来一周趋势预测卡（紧凑：核心结论，详情进弹窗） ----------------
 @Composable
-private fun PredictionCard(
-    ui: PredictionViewModel.UiState,
+private fun WeeklyTrendCard(
+    weekUi: WeeklyTrendViewModel.UiState,
     onRefresh: () -> Unit
 ) {
     Card(
@@ -687,14 +626,14 @@ private fun PredictionCard(
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            val stock = ui.stock
+            val stock = weekUi.stock
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "盘中实时预测 · ${stock?.name ?: ""}",
+                    "未来一周预测 · ${stock?.name ?: ""}",
                     fontWeight = FontWeight.Bold, fontSize = 13.sp,
                     modifier = Modifier.weight(1f)
                 )
-                if (stock != null && !PredictionEngine.isPredictable(stock)) {
+                if (stock != null && !isAStock(stock)) {
                     HintText("不支持")
                 } else {
                     Button(
@@ -704,13 +643,53 @@ private fun PredictionCard(
                 }
             }
             when {
-                stock != null && !PredictionEngine.isPredictable(stock) -> {
-                    HintText("港股/美股无 A 股分时口径，不支持盘中预测")
-                }
-                ui.signal != null -> SignalBanner(ui.signal)
-                ui.error != null -> HintText(ui.error)
-                else -> HintText("信号计算中…")
+                stock != null && !isAStock(stock) -> HintText("港股/美股暂不支持周趋势预测（仅 A 股）")
+                weekUi.loading && weekUi.result == null -> HintText("预测计算中…")
+                weekUi.result != null -> TrendResultBanner(weekUi.result)
+                weekUi.error != null -> HintText(weekUi.error)
+                else -> HintText("预测计算中…")
             }
+        }
+    }
+}
+
+/** 周趋势结论横幅（方向 + 分数 + 信心 + 关键原因 + 回测命中率） */
+@Composable
+private fun TrendResultBanner(result: WeeklyTrendResult) {
+    val color = when (result.outcome) {
+        TrendOutcome.UP -> UpColor
+        TrendOutcome.DOWN -> DownColor
+        TrendOutcome.FLAT -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+    }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(color.copy(alpha = 0.08f), RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "${result.outcome.label} ${String.format("%+.1f", result.score)}",
+                fontSize = 14.sp, fontWeight = FontWeight.Bold, color = color
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "信心 ${result.confidence}",
+                fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+            )
+        }
+        result.reasons.forEach { r ->
+            Text("· $r", fontSize = 11.sp, lineHeight = 15.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f))
+        }
+        result.backtest?.let { bt ->
+            val rate = bt.hitRate?.let { String.format(Locale.US, "%.0f%%", it * 100) } ?: "—"
+            val fwd = bt.avgForwardReturn?.let { String.format(Locale.US, "%+.1f%%", it) } ?: "—"
+            Text(
+                "回测：方向命中率 $rate（${bt.samples} 样本）· 平均前向收益 $fwd",
+                fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+            )
         }
     }
 }
@@ -1235,7 +1214,6 @@ private fun ClearDialog(
 private fun IntradayDialog(
     points: List<MinutePoint>?,
     loading: Boolean,
-    signal: IntradaySignal?,
     prevClose: Double?,
     stockName: String,
     buys: List<Pair<Int, Double>>,
@@ -1255,7 +1233,6 @@ private fun IntradayDialog(
         title = { Text("$stockName 分时") },
         text = {
             Column {
-                signal?.let { SignalBanner(it) }
                 when {
                     loading && points == null -> HintText("分时加载中…")
                     points == null -> HintText("分时数据获取失败，请检查网络")
@@ -1265,47 +1242,6 @@ private fun IntradayDialog(
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
     )
-}
-
-/** 盘中择时信号横幅（等级 + 分数 + 原因；降级提示灰显；数据收集期显示为中性"收集中"） */
-@Composable
-private fun SignalBanner(signal: IntradaySignal) {
-    val pending = signal.pending
-    val actionColor = when {
-        pending != null -> MaterialTheme.colorScheme.primary
-        signal.action == IntradayAction.BUY -> UpColor
-        signal.action == IntradayAction.SELL -> DownColor
-        signal.action == IntradayAction.HOLD -> MaterialTheme.colorScheme.primary
-        else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-    }
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(bottom = 8.dp)
-            .background(actionColor.copy(alpha = 0.08f), RoundedCornerShape(8.dp))
-            .padding(horizontal = 10.dp, vertical = 8.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = pending ?: "${signal.action.label} ${String.format("%+.1f", signal.score)}",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
-                color = actionColor
-            )
-            if (pending != null && signal.degraded) {
-                Spacer(Modifier.width(8.dp))
-                Text("信号降级", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
-            }
-        }
-        signal.reasons.forEach { reason ->
-            Text(
-                text = "· $reason",
-                fontSize = 11.sp,
-                lineHeight = 15.sp,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
-            )
-        }
-    }
 }
 
 /** 分时图：价格线 + 均价线 + 昨收虚线 + 今日买卖点标记 + 时间刻度（红涨绿跌） */
@@ -1400,21 +1336,20 @@ private fun IntradayChart(points: List<MinutePoint>, prevClose: Double?, buys: L
     }
 }
 
-// ---------------- 账户总览（并列标签：浮盈/市值/已实现/盘中信号） ----------------
+// ---------------- 首页（股票选择 + 周趋势预测 + 持仓明细 + 交易记录） ----------------
 @Composable
 private fun HomeScreen(
     padding: PaddingValues,
     state: StockState,
     acc: StockAccount?,
-    predStock: Stock?,
-    predUi: PredictionViewModel.UiState,
+    weekUi: WeeklyTrendViewModel.UiState,
     onSelect: (Int) -> Unit,
     onAdd: () -> Unit,
     onRefreshAll: () -> Unit,
     onEditPrice: () -> Unit,
     onRefreshPrice: () -> Unit,
     onIntraday: () -> Unit,
-    onRefreshSignal: () -> Unit,
+    onRefreshTrend: () -> Unit,
     onTrade: () -> Unit,
     onClear: () -> Unit
 ) {
@@ -1462,8 +1397,8 @@ private fun HomeScreen(
                 )
             }
             item {
-                if (predStock != null && acc != null) {
-                    PredictionCard(ui = predUi, onRefresh = onRefreshSignal)
+                if (acc != null) {
+                    WeeklyTrendCard(weekUi = weekUi, onRefresh = onRefreshTrend)
                 }
             }
             item { HoldingsCard(acc) }
@@ -1492,7 +1427,6 @@ private fun MineScreen(
     padding: PaddingValues,
     page: MinePage,
     onPageChange: (MinePage) -> Unit,
-    notifLogStore: NotificationLogStore,
     themePref: ThemePreference,
     onThemeChange: (ThemePreference) -> Unit,
     onOpenFee: () -> Unit,
@@ -1507,7 +1441,7 @@ private fun MineScreen(
     BackHandler(enabled = page != MinePage.MENU) {
         onPageChange(
             when (page) {
-                MinePage.SETTINGS, MinePage.NOTIFICATIONS -> MinePage.MENU
+                MinePage.SETTINGS -> MinePage.MENU
                 MinePage.APPEARANCE -> MinePage.SETTINGS
                 MinePage.MENU -> MinePage.MENU
             }
@@ -1516,13 +1450,9 @@ private fun MineScreen(
     when (page) {
         MinePage.MENU -> MineMenu(
             padding = padding,
-            onOpenNotifications = { onPageChange(MinePage.NOTIFICATIONS) },
             onOpenSettings = { onPageChange(MinePage.SETTINGS) },
             onOpenAbout = onOpenAbout
         )
-        MinePage.NOTIFICATIONS -> MineSubPage(padding, "通知历史", onBack = { onPageChange(MinePage.MENU) }) {
-            NotificationLogContent(notifLogStore)
-        }
         MinePage.SETTINGS -> MineSubPage(
             padding, "设置",
             onBack = { onPageChange(MinePage.MENU) }
@@ -1550,12 +1480,11 @@ private fun MineScreen(
     }
 }
 
-private enum class MinePage { MENU, NOTIFICATIONS, SETTINGS, APPEARANCE }
+private enum class MinePage { MENU, SETTINGS, APPEARANCE }
 
 @Composable
 private fun MineMenu(
     padding: PaddingValues,
-    onOpenNotifications: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenAbout: () -> Unit
 ) {
@@ -1602,43 +1531,6 @@ private fun MineSubPage(
     }
 }
 
-@Composable
-private fun NotificationLogContent(store: NotificationLogStore) {
-    var entries by remember { mutableStateOf(store.load()) }
-    var showClearConfirm by remember { mutableStateOf(false) }
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text("共 ${entries.size} 条", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
-        Spacer(Modifier.weight(1f))
-        TextButton(
-            onClick = { showClearConfirm = true },
-            enabled = entries.isNotEmpty()
-        ) { Text("清空", fontSize = 12.sp, color = MaterialTheme.colorScheme.error) }
-    }
-    if (entries.isEmpty()) {
-        EmptyText("暂无通知记录")
-    } else {
-        entries.forEach { n ->
-            NotificationRow(n)
-            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
-        }
-    }
-    if (showClearConfirm) {
-        AlertDialog(
-            onDismissRequest = { showClearConfirm = false },
-            title = { Text("清空通知") },
-            text = { Text("确定要清空全部 ${entries.size} 条通知历史吗？此操作不可恢复。") },
-            confirmButton = {
-                TextButton(onClick = {
-                    store.clear()
-                    entries = emptyList()
-                    showClearConfirm = false
-                }) { Text("清空", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = { TextButton(onClick = { showClearConfirm = false }) { Text("取消") } }
-        )
-    }
-}
-
 /** 已实现统计粒度：月 / 日 / 年 */
 private enum class RealizedGranularity { MONTH, DAY, YEAR }
 
@@ -1647,11 +1539,11 @@ private enum class RealizedGranularity { MONTH, DAY, YEAR }
 private fun OverviewScreen(
     padding: PaddingValues,
     accounts: List<StockAccount>,
-    predUi: PredictionViewModel.UiState,
-    onRefreshSignals: () -> Unit,
+    weekUi: WeeklyTrendViewModel.UiState,
+    onRefreshTrends: () -> Unit,
     onRefreshData: () -> Unit
 ) {
-    // 标签顺序：浮盈 → 盘中信号 → 已实现 → 市值 → 股数（null 表示盘中信号）
+    // 标签顺序：浮盈 → 周趋势 → 已实现 → 市值 → 股数（null 表示周趋势）
     val tabEntries: List<OverviewTab?> = listOf(
         OverviewTab.FLOAT,
         null,
@@ -1659,7 +1551,7 @@ private fun OverviewScreen(
         OverviewTab.VALUE,
         OverviewTab.SHARES
     )
-    val tabLabels = tabEntries.map { it?.label ?: "盘中信号" }
+    val tabLabels = tabEntries.map { it?.label ?: "周趋势" }
     var selected by remember { mutableStateOf(0) }
     val isPredict = tabEntries.getOrNull(selected) == null
     val dataTab = if (!isPredict) tabEntries[selected] else null
@@ -1689,15 +1581,9 @@ private fun OverviewScreen(
         accounts.associate { acc -> acc.stock.name to acc.dayChangePct }
     }
     val total = entries.sumOf { kotlin.math.abs(it.value) }
-    // 进入"盘中信号"标签自动刷新一次，停留期间每 30 秒自动刷新
+    // 进入"周趋势"标签刷新一次（多日维度，无需 30 秒自动刷新）
     LaunchedEffect(isPredict) {
-        if (isPredict) {
-            onRefreshSignals()
-            while (true) {
-                delay(30_000)
-                onRefreshSignals()
-            }
-        }
+        if (isPredict) onRefreshTrends()
     }
     Column(
         Modifier
@@ -1722,7 +1608,7 @@ private fun OverviewScreen(
                             Modifier
                                 .clickable {
                                     selected = i
-                                    if (tabEntries.getOrNull(i) == null) onRefreshSignals()
+                                    if (tabEntries.getOrNull(i) == null) onRefreshTrends()
                                 }
                                 .padding(horizontal = 14.dp, vertical = 12.dp)
                         ) {
@@ -1765,7 +1651,7 @@ private fun OverviewScreen(
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
-                if (isPredict) "盘中信号（每 30 秒自动刷新）"
+                if (isPredict) "周趋势预测（未来 5 个交易日）"
                 else if (dataTab == OverviewTab.REALIZED) "已实现 · ${realizedRangeLabel(realizedRange)}"
                 else "${dataTab?.label}（按持仓占比）",
                 fontSize = 12.sp,
@@ -1774,7 +1660,7 @@ private fun OverviewScreen(
             )
             TextButton(onClick = {
                 if (isPredict) {
-                    onRefreshSignals()
+                    onRefreshTrends()
                 } else {
                     dataRefreshing = true
                     onRefreshData()
@@ -1782,7 +1668,7 @@ private fun OverviewScreen(
                 }
             }) {
                 Text(
-                    if (isPredict) (if (predUi.running) "刷新中…" else "刷新")
+                    if (isPredict) (if (weekUi.loading) "刷新中…" else "刷新")
                     else (if (dataRefreshing) "刷新中…" else "刷新"),
                     fontSize = 12.sp
                 )
@@ -1813,7 +1699,7 @@ private fun OverviewScreen(
             }
         }
         if (isPredict) {
-            PredictionPanel(predUi)
+            WeeklyTrendPanel(weekUi)
         } else if (accounts.isEmpty()) {
             EmptyText("暂无股票数据")
         } else {
@@ -2077,19 +1963,18 @@ private fun RealizedRangeSelector(
 }
 
 @Composable
-private fun PredictionPanel(predUi: PredictionViewModel.UiState) {
+private fun WeeklyTrendPanel(weekUi: WeeklyTrendViewModel.UiState) {
     // 展开的股票代码集合（默认全部收起，点击单行展开/收起）
     var expandedCodes by remember { mutableStateOf(setOf<String>()) }
-    if (predUi.allSignals.isEmpty()) {
-        HintText(predUi.error ?: "加载持仓盘中信号…")
+    if (weekUi.allTrends.isEmpty()) {
+        HintText(weekUi.error ?: "加载持仓周趋势预测…")
     } else {
         LazyColumn {
-            items(sortHoldingSignals(predUi.allSignals)) { row ->
-                val sig = row.signal
+            items(weekUi.allTrends.sortedByDescending { it.result?.score ?: Double.NEGATIVE_INFINITY }) { row ->
+                val result = row.result
                 val code = row.stock.marketCode
                 val expanded = code in expandedCodes
-                val freezeSell = isFreezeBarredSell(row)
-                // 紧凑单行：股票名 + 动作/分数
+                // 紧凑单行：股票名 + 方向/分数
                 Row(
                     Modifier
                         .fillMaxWidth()
@@ -2105,40 +1990,31 @@ private fun PredictionPanel(predUi: PredictionViewModel.UiState) {
                         fontWeight = FontWeight.Medium,
                         modifier = Modifier.weight(1f)
                     )
-                    if (sig == null) {
+                    if (result == null) {
                         HintText("获取失败")
-                    } else if (sig.pending != null) {
-                        Text(
-                            sig.pending,
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                        )
                     } else {
-                        val actionColor = when (sig.action) {
-                            IntradayAction.BUY -> UpColor
-                            IntradayAction.SELL -> DownColor
-                            IntradayAction.HOLD -> MaterialTheme.colorScheme.primary
-                            else -> MaterialTheme.colorScheme.onSurface
+                        val actionColor = when (result.outcome) {
+                            TrendOutcome.UP -> UpColor
+                            TrendOutcome.DOWN -> DownColor
+                            TrendOutcome.FLAT -> MaterialTheme.colorScheme.onSurface
                         }
                         Text(
-                            "${sig.action.label} ${String.format("%+.1f", sig.score)}",
+                            "${result.outcome.label} ${String.format("%+.1f", result.score)}",
                             fontSize = 13.sp, fontWeight = FontWeight.Bold,
                             color = actionColor
                         )
-                        if (freezeSell) {
-                            Text(
-                                "T+1冻结",
-                                fontSize = 10.sp,
-                                color = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.padding(start = 4.dp)
-                            )
-                        }
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "信心${result.confidence}",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                        )
                     }
                 }
-                // 展开详情：原因 + 历史验证
+                // 展开详情：关键因子 + 历史回测
                 if (expanded) {
                     Column(Modifier.padding(start = 0.dp, bottom = 8.dp)) {
-                        sig?.reasons?.forEach { r ->
+                        result?.reasons?.forEach { r ->
                             Text(
                                 "· $r",
                                 fontSize = 11.sp,
@@ -2146,11 +2022,11 @@ private fun PredictionPanel(predUi: PredictionViewModel.UiState) {
                                 modifier = Modifier.padding(bottom = 2.dp)
                             )
                         }
-                        val stats = row.stats
-                        if (stats != null) {
-                            val rateText = stats.hitRatePct?.let { "命中率 $it" } ?: "样本积累中"
+                        result?.backtest?.let { bt ->
+                            val rateText = bt.hitRate?.let { String.format(Locale.US, "%.0f%%", it * 100) } ?: "—"
+                            val fwd = bt.avgForwardReturn?.let { String.format(Locale.US, "%+.1f%%", it) } ?: "—"
                             Text(
-                                "历史验证：$rateText（${stats.directional} 样本） · 扣费期望 ${stats.avgNetMoveText ?: "—"}",
+                                "回测：命中率 $rateText（${bt.samples} 样本） · 平均前向收益 $fwd",
                                 fontSize = 10.sp,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
                                 modifier = Modifier.padding(bottom = 4.dp)
@@ -2279,78 +2155,6 @@ private fun OverviewLegendRow(
             val pct = if (total > 0) kotlin.math.abs(e.value) / total * 100 else 0.0
             Text(String.format("%.1f%%", pct), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
         }
-    }
-}
-
-// ---------------- 系统通知点按后的消息详情弹窗 ----------------
-@Composable
-private fun NotificationDetailDialog(detail: NotificationDetail, onDismiss: () -> Unit) {
-    val badgeColor = if (detail.kindLabel == NotificationKind.INTRADAY.label) Color(0xFF00897B)
-    else MaterialTheme.colorScheme.primary
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            shape = RoundedCornerShape(16.dp),
-            color = MaterialTheme.colorScheme.surface,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        Modifier
-                            .background(badgeColor, RoundedCornerShape(4.dp))
-                            .padding(horizontal = 8.dp, vertical = 3.dp)
-                    ) {
-                        Text(
-                            detail.kindLabel.ifEmpty { "通知" },
-                            fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White
-                        )
-                    }
-                    Spacer(Modifier.weight(1f))
-                    IconButton(onClick = onDismiss) {
-                        Icon(Icons.Default.Close, contentDescription = "关闭")
-                    }
-                }
-                Text(detail.title, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                HorizontalDivider()
-                Text(
-                    detail.body,
-                    fontSize = 14.sp,
-                    lineHeight = 20.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
-                )
-                TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) {
-                    Text("关闭")
-                }
-            }
-        }
-    }
-}
-
-// ---------------- 通知历史表格（"我的"页内嵌） ----------------
-@Composable
-private fun NotificationRow(n: AppNotification) {
-    val badgeColor = when (n.kind) {
-        NotificationKind.AUCTION -> MaterialTheme.colorScheme.primary
-        NotificationKind.INTRADAY -> Color(0xFF00897B)
-    }
-    Row(
-        Modifier.fillMaxWidth().padding(vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            Modifier
-                .background(badgeColor, RoundedCornerShape(4.dp))
-                .padding(horizontal = 6.dp, vertical = 2.dp)
-        ) {
-            Text(n.kind.label, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White)
-        }
-        Spacer(Modifier.width(8.dp))
-        Column(Modifier.weight(1f)) {
-            Text(n.title, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-            Text(n.body, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
-        }
-        Spacer(Modifier.width(6.dp))
-        Text(formatTime(n.timeMs), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f))
     }
 }
 

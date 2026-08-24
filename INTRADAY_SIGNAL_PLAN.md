@@ -1,5 +1,7 @@
 # 盘中择时信号设计方案 v2
 
+> **⚠️ 已退役（v14 起）**：盘中实时信号已随未来一周趋势预测上线而整体下线（见 `MODEL_CHANGES.md` v14 / `WEEKLY_TREND_PLAN.md`）。本文档仅作历史存档，不再维护。
+
 > 依据 `INTRADAY_SIGNAL_REVIEW.md` 评审意见修订（v1 → v2）。实施记录按惯例追加至 MODEL_CHANGES.md。
 
 ## 1. 背景与目标

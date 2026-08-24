@@ -6,7 +6,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 覆盖：腾讯行情字段解析（真实接口布局，已实测验证） */
+/** 覆盖：腾讯行情字段解析 / 时间戳日期判定 / 分时解析 / 指数基准映射 */
 class MarketDataTest {
 
     /** 实测格式：0..37 位关键字段 */
@@ -60,104 +60,8 @@ class MarketDataTest {
         assertFalse(quoteTimeIsOnDate("", "20260807"))                          // 空时间戳
         assertFalse(quoteTimeIsOnDate("102532", "20260807"))                    // 不足日期前缀
     }
-}
 
-/** 假 StockApi：按代码返回预设行情文本 */
-class FakeStockApi(private val responses: Map<String, String>) : StockApi() {
-    override suspend fun fetchRaw(query: String): String? = responses[query]
-}
-
-/** 覆盖：板块联动名单按股票配置、未配置股票走兜底 */
-class SectorMapTest {
-
-    private fun rawOf(code: String, name: String, pct: String): String {
-        val fields = MutableList(40) { "" }
-        fields[1] = name; fields[2] = code
-        fields[3] = "10.0"; fields[32] = pct
-        return "v_$code=\"" + fields.joinToString("~") + "\";"
-    }
-
-    private fun apiWith(vararg entries: Pair<String, String>): TencentMarketDataApi {
-        val map = entries.associate { it }
-        // 补上外部与目标所需的最小集合
-        val full = map.toMutableMap()
-        full.putIfAbsent("usDJI", rawOf("DJI", "道琼斯", "0.5"))
-        full.putIfAbsent("usIXIC", rawOf("IXIC", "纳斯达克", "0.8"))
-        full.putIfAbsent("usINX", rawOf("INX", "标普500", "0.3"))
-        return TencentMarketDataApi(FakeStockApi(full))
-    }
-
-    @org.junit.Test
-    fun 板块联动_ETF用创业板权重股名单() = kotlinx.coroutines.test.runTest {
-        val api = apiWith(
-            "sz159915" to rawOf("159915", "创业板ETF华夏", "1.0"),
-            "sz399006" to rawOf("399006", "创业板指", "1.2"),
-            "sz300750" to rawOf("300750", "宁德时代", "2.0"),
-            "sz300059" to rawOf("300059", "东方财富", "1.0")
-        )
-        val snap = api.fetchSnapshot(Stock("159915", "创业板ETF华夏", "sz"))
-        assertEquals(1.0, snap.target!!.pct!!, 0.0001)
-        assertEquals(1.2, snap.indexPct!!, 0.0001)
-        // 只返回了名单里实际有数据的
-        assertEquals(2, snap.sector.size)
-        assertTrue(snap.sector.any { it.code == "300750" && it.name == "宁德时代" })
-        assertEquals(3, snap.externalPct.size)
-    }
-
-    @org.junit.Test
-    fun 板块联动_个股用通信算力链名单() = kotlinx.coroutines.test.runTest {
-        val api = apiWith(
-            "sz002396" to rawOf("002396", "星网锐捷", "3.0"),
-            "sz399001" to rawOf("399001", "深证成指", "1.0"),
-            "sz300308" to rawOf("300308", "中际旭创", "2.0"),
-            "sz000063" to rawOf("000063", "中兴通讯", "0.5")
-        )
-        val snap = api.fetchSnapshot(Stock("002396", "星网锐捷", "sz"))
-        assertEquals(3.0, snap.target!!.pct!!, 0.0001)
-        assertEquals(1.0, snap.indexPct!!, 0.0001)  // 深证成指
-        assertEquals(2, snap.sector.size)
-        assertTrue(snap.sector.any { it.code == "300308" })
-    }
-
-    @org.junit.Test
-    fun 板块联动_未配置股票走大盘兜底() = kotlinx.coroutines.test.runTest {
-        val api = apiWith(
-            "sh603000" to rawOf("603000", "某某集团", "1.0"),
-            "sh000001" to rawOf("000001", "上证指数", "0.5")
-        )
-        val snap = api.fetchSnapshot(Stock("603000", "某某集团", "sh"))
-        assertNull(snap.indexPct)                                    // 兜底指数 sz399001 无数据 → null
-        assertTrue(snap.sector.any { it.code == "000001" && it.name == "上证指数" })  // 兜底名单生效
-        assertEquals(0, snap.sector.count { it.code == "300750" })  // 不会用 ETF 的名单
-    }
-
-    @org.junit.Test
-    fun 候选池_20行业_总条目100只_代码基本唯一() {
-        assertEquals(20, TencentMarketDataApi.INDUSTRY_SECTOR_LISTS.size)
-        val entries = TencentMarketDataApi.INDUSTRY_SECTOR_LISTS.values.flatten()
-        assertEquals(100, entries.size)                          // 20 × 5
-        assertTrue(entries.map { it.first }.distinct().size >= 98) // 个别双行业标签（如阳光电源）
-        assertEquals(entries.map { it.first }.distinct().size, TencentMarketDataApi.UNIVERSE_CODES.size)
-        assertEquals(TencentMarketDataApi.UNIVERSE_CODES.size, TencentMarketDataApi.UNIVERSE_INDUSTRY.size)
-    }
-
-    @org.junit.Test
-    fun 候选池_批量抓取解析一条响应() = kotlinx.coroutines.test.runTest {
-        val lines = buildString {
-            append(rawOf("600519", "贵州茅台", "1.0", "sh600519"))
-            append(rawOf("300750", "宁德时代", "2.0", "sz300750"))
-        }
-        // 对任意查询都返回同一多行响应
-        val api = TencentMarketDataApi(object : StockApi() {
-            override suspend fun fetchRaw(query: String): String? = lines
-        })
-        val gaps = api.fetchUniverse(listOf())
-        assertTrue(gaps.any { it.code == "sh600519" && it.name == "贵州茅台" && it.industry == "白酒" })
-        assertTrue(gaps.any { it.code == "sz300750" && it.name == "宁德时代" && it.industry == "新能源" })
-        assertEquals(2, gaps.size)
-    }
-
-    @org.junit.Test
+    @Test
     fun 分时数据_解析与均价推导() {
         val json = """{"code":0,"msg":"","data":{"sz159915":{"data":{"data":[
             "0930 3.497 100 500.00",
@@ -177,14 +81,14 @@ class SectorMapTest {
         assertEquals(1500.0 / (300 * 100.0), pts[1].avgPrice, 0.0001)
     }
 
-    @org.junit.Test
+    @Test
     fun 分时数据_异常返回null或空() {
         assertNull(parseMinuteData("not json"))
         assertNull(parseMinuteData("""{"code":1,"data":{}}"""))
         assertNull(parseMinuteData("""{"code":0,"data":{"sz159915":{"data":{"data":[]}}}}"""))
     }
 
-    @org.junit.Test
+    @Test
     fun 分钟索引_非法输入返回null() {
         assertNull(parseMinuteIndex(""))
         assertNull(parseMinuteIndex("093"))
@@ -193,7 +97,7 @@ class SectorMapTest {
         assertEquals(0, parseMinuteIndex("0930")!!)
     }
 
-    @org.junit.Test
+    @Test
     fun 分钟索引_时间戳转换() {
         fun at(h: Int, m: Int): Long = java.util.Calendar.getInstance().apply {
             set(java.util.Calendar.HOUR_OF_DAY, h)
@@ -208,10 +112,15 @@ class SectorMapTest {
         assertEquals(0, minuteIndexOf(at(8, 0)))         // 开盘前收敛
     }
 
-    private fun rawOf(code: String, name: String, pct: String, key: String): String {
-        val fields = MutableList(40) { "" }
-        fields[1] = name; fields[2] = code
-        fields[3] = "10.0"; fields[32] = pct
-        return "v_$key=\"" + fields.joinToString("~") + "\";"
+    @Test
+    fun 指数基准按市场板块映射() {
+        assertEquals("sh000001", indexCodeFor(Stock("600519", "贵州茅台", "sh")))
+        assertEquals("sh000688", indexCodeFor(Stock("688981", "中芯国际", "sh")))
+        assertEquals("sh000300", indexCodeFor(Stock("510300", "沪深300ETF", "sh")))
+        assertEquals("sz399001", indexCodeFor(Stock("000001", "平安银行", "sz")))
+        assertEquals("sz399006", indexCodeFor(Stock("300750", "宁德时代", "sz")))
+        assertEquals("sz399006", indexCodeFor(Stock("159915", "创业板ETF", "sz"))) // 内置配置优先
+        assertNull(indexCodeFor(Stock("832566", "北交个股", "bj")))
+        assertNull(indexCodeFor(Stock("00700", "腾讯控股", "hk")))
     }
 }

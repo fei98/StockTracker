@@ -1,5 +1,7 @@
 # 盘中择时信号评审（INTRADAY_SIGNAL_REVIEW）
 
+> **⚠️ 已退役（v14 起）**：盘中实时信号已随未来一周趋势预测上线而整体下线（见 `MODEL_CHANGES.md` v14 / `WEEKLY_TREND_PLAN.md`）。本文档仅作历史存档，不再维护。
+
 > 独立评审文档，不包含在方案文档（`INTRADAY_SIGNAL_PLAN.md`）内。
 > **约定：最新评审放最前面，旧评审依次下移。** 实施记录见 `MODEL_CHANGES.md`。
 
