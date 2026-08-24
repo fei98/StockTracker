@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.stocktracker"
         minSdk = 26
         targetSdk = 35
-        versionCode = 38
-        versionName = "3.17"
+        versionCode = 39
+        versionName = "3.18"
     }
 
     buildTypes {

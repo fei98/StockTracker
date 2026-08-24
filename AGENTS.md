@@ -13,7 +13,7 @@
 
 ```powershell
 $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"   # AGP 8.13 需 JDK 25；仅装 JDK 17 会触发 foojay 下载失败
-.\gradlew.bat :app:testDebugUnitTest   # JUnit 4 单元测试（无需设备/模拟器），全量 173 例
+.\gradlew.bat :app:testDebugUnitTest   # JUnit 4 单元测试（无需设备/模拟器），全量 181 例
 .\gradlew.bat :app:assembleDebug       # 构建 APK
 adb install -r app\build\outputs\apk\debug\app-debug.apk
 ```

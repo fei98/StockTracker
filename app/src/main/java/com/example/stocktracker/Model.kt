@@ -118,6 +118,50 @@ fun matchSellLots(holdings: List<BuyLot>, qty: Int, price: Double, strategy: Sel
 }
 
 /**
+ * 券商 T+1 视角的可卖数量（A 股）：按时间序重放交易，模拟券商"卖出只先抵当时可卖（非当日买入）批次"，
+ * 得到每批次（按 id）的"券商剩余"；再与当前持仓对齐：能对齐的批次用券商剩余，缺 trades 的批次用持仓剩余。
+ *
+ * 与 App 记账（最低价优先、不限 T+1）解耦：解决"当日补仓低价后被卖出时，App 抵用冻结批次、
+ * 剩余可卖批次实际是券商已卖出的部分，导致可卖数虚高"的问题。
+ * 关键："当时可卖"用每笔卖出的时刻判定（而非最终 now），避免历史时点冻结状态错乱。
+ */
+fun brokerSellableQty(holdings: List<BuyLot>, trades: List<TradeRecord>, now: Long): Int {
+    class Lot(val id: Long, val price: Double, val time: Long, var remaining: Int)
+    val lots = mutableListOf<Lot>()
+    trades.sortedBy { it.time }.forEach { t ->
+        when (t.type) {
+            TradeType.BUY -> {
+                // 优先用 lotId 关联持仓批次；旧数据无 lotId 时退回 trade id
+                val lotId = t.lotId ?: t.id
+                lots += Lot(lotId, t.price, t.time, t.qty)
+            }
+            TradeType.SELL -> {
+                var toSell = t.qty
+                // 先抵"当时可卖"批次（非 t.time 当日买入），按价格从低到高
+                for (lot in lots.filter { !isSameDay(it.time, t.time) }.sortedBy { it.price }) {
+                    if (toSell <= 0) break
+                    val take = minOf(lot.remaining, toSell)
+                    lot.remaining -= take
+                    toSell -= take
+                }
+                // 可卖不足时抵"当时冻结"批次（当日买入；App 记账允许突破 T+1）
+                for (lot in lots.filter { isSameDay(it.time, t.time) }.sortedBy { it.price }) {
+                    if (toSell <= 0) break
+                    val take = minOf(lot.remaining, toSell)
+                    lot.remaining -= take
+                    toSell -= take
+                }
+            }
+        }
+    }
+    val brokerRemaining = lots.associate { it.id to it.remaining }
+    return holdings.sumOf { lot ->
+        val rem = brokerRemaining[lot.id] ?: lot.remainingQty
+        if (!isSameDay(lot.time, now)) rem else 0
+    }
+}
+
+/**
  * 交易费率配置（A 股常见口径；买入/卖出统一适用）
  * 买入费 = max(金额×佣金率, 最低佣金) + 金额×过户费率
  * 卖出费 = max(金额×佣金率, 最低佣金) + 金额×印花税率 + 金额×过户费率
@@ -181,17 +225,13 @@ data class StockAccount(
         return if (pc > 0) (cp - pc) / pc * 100 else null
     }
 
-    /** T+1 可卖批次：A 股（sh/sz/bj）当日买入的冻结，港美股 T+0 当日即可卖 */
-    val sellableHoldings: List<BuyLot>
-        get() {
-            val now = System.currentTimeMillis()
-            return holdings.filter { lot ->
-                stock.market == "hk" || stock.market == "us" || !isSameDay(lot.time, now)
-            }
-        }
-
-    /** 可卖数量 */
-    val sellableQty: Int get() = sellableHoldings.sumOf { it.remainingQty }
+    /**
+     * 可卖数量：港美股 T+0 = 全部持仓；A 股按券商 T+1 视角重算（卖出只抵"当时可卖"批次，
+     * 与 App 记账"最低价优先/不限 T+1"解耦，避免当日补仓低价被抵用后可卖数虚高）。
+     */
+    val sellableQty: Int get() =
+        if (stock.market == "hk" || stock.market == "us") totalQty
+        else brokerSellableQty(holdings, trades, System.currentTimeMillis())
 
     /** 持仓总成本（裸价，不含手续费） */
     val totalCost: Double get() = holdings.sumOf { it.price * it.remainingQty }

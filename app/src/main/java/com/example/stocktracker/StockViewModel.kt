@@ -231,7 +231,7 @@ class StockViewModel(
                 accounts = updateSelected(s) { a ->
                     a.copy(
                         holdings = a.holdings + lot,
-                        trades = a.trades + TradeRecord(nextId++, TradeType.BUY, price, qty, fee = buyFee, lotId = lot.id),
+                        trades = a.trades + TradeRecord(nextId++, TradeType.BUY, price, qty, time = time, fee = buyFee, lotId = lot.id),
                         totalBuyFee = a.totalBuyFee + buyFee
                     )
                 },

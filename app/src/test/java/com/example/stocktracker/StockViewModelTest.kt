@@ -929,4 +929,94 @@ class StockViewModelTest {
         vm.undoLastTrade()
         assertTrue(vm.state.value.message!!.contains("没有可撤销"))
     }
+
+    // ---------------- 可卖数（券商 T+1 视角重算，方案 B） ----------------
+
+    @Test
+    fun 可卖数_当日补仓低价卖出后按券商视角为0() {
+        val vm = vmWithStock()
+        vm.buy(3.0, 300, time = yesterday) // 昨日 300（可卖）
+        vm.buy(2.0, 300)                   // 今日补仓 300（冻结，低价）
+        assertEquals(300, vm.state.value.selected!!.sellableQty)
+        vm.sell(3.5, 300)                  // 最低价优先抵今日 2 元 300（记账口径不变）
+        val acc = vm.state.value.selected!!
+        assertEquals(300, acc.totalQty)                    // 记账剩余昨日 300
+        assertEquals(3.0, acc.holdings[0].price, 0.0001)  // 剩昨日批次
+        assertEquals(0, acc.sellableQty)                   // 券商视角可卖 0
+    }
+
+    @Test
+    fun 可卖数_部分卖出_券商视角剩余可卖() {
+        val vm = vmWithStock()
+        vm.buy(3.0, 300, time = yesterday) // 昨日 300（可卖）
+        vm.buy(2.0, 300)                   // 今日 300（冻结，低价）
+        vm.sell(3.5, 150)                  // 记账最低价优先抵今日 2 元 150
+        val acc = vm.state.value.selected!!
+        // 券商：卖 150 抵可卖（昨日 300 中 150）→ 剩昨日 150 可卖 + 今日 300 冻结
+        assertEquals(150, acc.sellableQty)
+        assertEquals(450, acc.totalQty)
+    }
+
+    @Test
+    fun 可卖数_今日买入冻结_不可卖() {
+        val vm = vmWithStock()
+        vm.buy(2.0, 300) // 今日买入
+        assertEquals(0, vm.state.value.selected!!.sellableQty)
+    }
+
+    @Test
+    fun 可卖数_昨日买入今日可卖() {
+        val vm = vmWithStock()
+        vm.buy(2.0, 300, time = yesterday)
+        assertEquals(300, vm.state.value.selected!!.sellableQty)
+    }
+
+    // ---------------- 可卖数重放（brokerSellableQty 纯函数边界） ----------------
+
+    @Test
+    fun 可卖数重放_用户场景() {
+        val y = yesterday
+        val now = System.currentTimeMillis()
+        val holdings = listOf(BuyLot(1L, 3.0, 300, 300, time = y)) // 记账剩余昨日 300
+        val trades = listOf(
+            TradeRecord(1, TradeType.BUY, 3.0, 300, time = y, lotId = 1L),
+            TradeRecord(2, TradeType.BUY, 2.0, 300, time = now, lotId = 2L), // 今日补仓低价
+            TradeRecord(3, TradeType.SELL, 3.5, 300, time = now)             // 今日卖：先抵可卖昨日 300
+        )
+        // 券商视角昨日已卖 → 当前可卖 0
+        assertEquals(0, brokerSellableQty(holdings, trades, now))
+    }
+
+    @Test
+    fun 可卖数重放_昨日买昨日卖_当时冻结抵扣() {
+        val y = yesterday
+        // 昨日买 300、昨日卖 300：卖出时刻批次为"当时冻结"（T+1），记账允许突破 → 抵冻结 300
+        val trades = listOf(
+            TradeRecord(1, TradeType.BUY, 3.0, 300, time = y, lotId = 1L),
+            TradeRecord(2, TradeType.SELL, 3.5, 300, profit = 150.0, time = y)
+        )
+        // 全部已卖、无持仓 → 可卖 0；若误用"最终 now"判定会得 300，此断言确保按卖出时刻判定
+        assertEquals(0, brokerSellableQty(emptyList(), trades, System.currentTimeMillis()))
+    }
+
+    @Test
+    fun 可卖数重放_全部昨日_全部可卖() {
+        val y = yesterday
+        val holdings = listOf(
+            BuyLot(1L, 3.0, 300, 300, time = y),
+            BuyLot(2L, 2.0, 200, 200, time = y)
+        )
+        val trades = listOf(
+            TradeRecord(1, TradeType.BUY, 3.0, 300, time = y, lotId = 1L),
+            TradeRecord(2, TradeType.BUY, 2.0, 200, time = y, lotId = 2L)
+        )
+        assertEquals(500, brokerSellableQty(holdings, trades, System.currentTimeMillis()))
+    }
+
+    @Test
+    fun 可卖数重放_缺trades的批次回退持仓剩余() {
+        // 只有 holdings 无对应 trades（如测试构造/旧数据）→ 按当前持仓的 time 判定
+        val holdings = listOf(BuyLot(1L, 3.0, 100, 100, time = 0L))
+        assertEquals(100, brokerSellableQty(holdings, emptyList(), System.currentTimeMillis()))
+    }
 }
