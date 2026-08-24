@@ -231,7 +231,7 @@ class StockViewModel(
                 accounts = updateSelected(s) { a ->
                     a.copy(
                         holdings = a.holdings + lot,
-                        trades = a.trades + TradeRecord(nextId++, TradeType.BUY, price, qty, fee = buyFee),
+                        trades = a.trades + TradeRecord(nextId++, TradeType.BUY, price, qty, fee = buyFee, lotId = lot.id),
                         totalBuyFee = a.totalBuyFee + buyFee
                     )
                 },
@@ -242,8 +242,8 @@ class StockViewModel(
     }
 
     /**
-     * 卖出：按“最低价优先抵扣”匹配全部持仓（不区分买入日期，T+1 不限制记账）。
-     * 例如持仓含 1元100、3元300、5元200，卖出300股 @4元：
+     * 卖出：按当前匹配策略抵扣持仓（默认最低价优先，可选最高价优先），不区分买入日期，T+1 不限制记账。
+     * 例如持仓含 1元100、3元300、5元200，卖出300股 @4元（最低价优先）：
      *   先抵扣1元100股（盈利300），再抵扣3元200股（盈利200），合计盈利500，3元剩100股。
      */
     fun sell(price: Double, qty: Int) {
@@ -253,35 +253,93 @@ class StockViewModel(
         if (acc.totalQty <= 0) { notify("当前无持仓，无法卖出"); return }
         if (qty > acc.totalQty) { notify("卖出数量超过持仓数量（${acc.totalQty} 股）"); return }
 
-        var toSell = qty
-        var profit = 0.0
-        var costFee = 0.0   // 被卖出批次分摊的买入手续费
-        val remaining = mutableListOf<BuyLot>()
-
-        // 全部持仓按单价从低到高抵扣（不论买入日期）
-        for (lot in acc.holdings.sortedBy { it.price }) {
-            if (toSell <= 0) {
-                remaining.add(lot); continue
-            }
-            val take = minOf(lot.remainingQty, toSell)
-            profit += (price - lot.price) * take
-            if (lot.originalQty > 0) costFee += lot.fee * take / lot.originalQty
-            toSell -= take
-            val left = lot.remainingQty - take
-            if (left > 0) remaining.add(lot.copy(remainingQty = left))
-        }
+        val m = matchSellLots(acc.holdings, qty, price, s.sellMatch)
 
         val sellFee = feeConfig.sellFee(price * qty)
         _state.update {
             it.copy(
                 accounts = updateSelected(it) { a ->
                     a.copy(
-                        holdings = remaining,
-                        trades = a.trades + TradeRecord(nextId++, TradeType.SELL, price, qty, profit, fee = sellFee, costFee = costFee)
+                        holdings = m.remaining,
+                        trades = a.trades + TradeRecord(
+                            nextId++, TradeType.SELL, price, qty, m.profit,
+                            fee = sellFee, costFee = m.costFee, soldLots = m.soldLots
+                        )
                     )
                 },
-                message = "卖出成功：${formatPrice(price)} 元 × $qty 股，净盈亏 ${formatMoney(profit - sellFee - costFee)} 元（费用 ${formatMoney(sellFee + costFee)} 元）"
+                message = "卖出成功：${formatPrice(price)} 元 × $qty 股，净盈亏 ${formatMoney(m.profit - sellFee - m.costFee)} 元（费用 ${formatMoney(sellFee + m.costFee)} 元）"
             )
+        }
+        persist()
+    }
+
+    /** 切换卖出匹配策略（全局偏好，持久化；默认最低价优先） */
+    fun setSellMatch(strategy: SellMatch) {
+        _state.update { it.copy(sellMatch = strategy) }
+        notify("卖出匹配已切换为：${strategy.label}")
+        persist()
+    }
+
+    /**
+     * 撤销最后一笔交易（防止写错）：
+     * - 撤销买入：仅当该批次仍完整在持仓（未被后续卖出消耗）时执行，移除批次并退回买入手续费。
+     * - 撤销卖出：按卖出时记录的批次明细原样恢复持仓（旧数据无明细时拒绝）。
+     */
+    fun undoLastTrade() {
+        val idx = _state.value.selectedIndex
+        if (idx < 0) { notify("请先添加并选择股票"); return }
+        val acc = _state.value.accounts.getOrNull(idx) ?: return
+        val last = acc.trades.lastOrNull() ?: run { notify("没有可撤销的交易"); return }
+        when (last.type) {
+            TradeType.BUY -> {
+                val lotId = last.lotId
+                if (lotId == null) {
+                    notify("该笔买入缺少批次信息（旧数据），无法撤销")
+                    return
+                }
+                val lot = acc.holdings.firstOrNull { it.id == lotId }
+                if (lot == null) { notify("该笔买入的批次已被卖出，无法撤销（请先撤销之后的卖出）"); return }
+                if (lot.remainingQty != lot.originalQty) {
+                    notify("该笔买入已被部分卖出，无法撤销（请先撤销之后的卖出）")
+                    return
+                }
+                _state.update { s ->
+                    s.copy(
+                        accounts = updateSelected(s) { a ->
+                            a.copy(
+                                holdings = a.holdings.filterNot { it.id == lot.id },
+                                trades = a.trades.dropLast(1),
+                                totalBuyFee = a.totalBuyFee - last.fee
+                            )
+                        },
+                        message = "已撤销买入：${formatPrice(last.price)} 元 × ${last.qty} 股（退回手续费 ${formatMoney(last.fee)} 元）"
+                    )
+                }
+            }
+            TradeType.SELL -> {
+                if (last.soldLots.isEmpty()) {
+                    notify("该笔卖出缺少批次明细（旧数据），无法撤销")
+                    return
+                }
+                _state.update { s ->
+                    s.copy(
+                        accounts = updateSelected(s) { a ->
+                            val holdings = a.holdings.toMutableList()
+                            last.soldLots.forEach { sl ->
+                                val existing = holdings.firstOrNull { it.id == sl.lotId }
+                                if (existing != null) {
+                                    val i = holdings.indexOf(existing)
+                                    holdings[i] = existing.copy(remainingQty = existing.remainingQty + sl.qty)
+                                } else {
+                                    holdings += BuyLot(sl.lotId, sl.price, sl.originalQty, sl.qty, sl.time, sl.fee)
+                                }
+                            }
+                            a.copy(holdings = holdings, trades = a.trades.dropLast(1))
+                        },
+                        message = "已撤销卖出：${formatPrice(last.price)} 元 × ${last.qty} 股，持仓已恢复"
+                    )
+                }
+            }
         }
         persist()
     }

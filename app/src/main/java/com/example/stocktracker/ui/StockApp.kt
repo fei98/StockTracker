@@ -116,6 +116,7 @@ import com.example.stocktracker.OverviewTab
 import com.example.stocktracker.PrefsStorage
 import com.example.stocktracker.QuoteResult
 import com.example.stocktracker.R
+import com.example.stocktracker.SellMatch
 import com.example.stocktracker.SettingsStore
 import com.example.stocktracker.Stock
 import com.example.stocktracker.StockAccount
@@ -316,6 +317,7 @@ fun StockApp() {
                         acc?.let { weekVm.refresh(it.stock, force = true) }
                     },
                     onTrade = { showTradeDialog = true },
+                    onUndo = vm::undoLastTrade,
                     onClear = { showClearDialog = true }
                 )
             }
@@ -325,6 +327,8 @@ fun StockApp() {
     if (showTradeDialog && acc != null) {
         TradeDialog(
             totalQty = acc.totalQty,
+            sellMatch = state.sellMatch,
+            onSellMatch = vm::setSellMatch,
             onBuy = vm::buy,
             onSell = vm::sell,
             onDismiss = { showTradeDialog = false }
@@ -964,6 +968,8 @@ private fun PriceDialog(
 @Composable
 private fun TradeDialog(
     totalQty: Int,
+    sellMatch: SellMatch,
+    onSellMatch: (SellMatch) -> Unit,
     onBuy: (Double, Int) -> Unit,
     onSell: (Double, Int) -> Unit,
     onDismiss: () -> Unit
@@ -999,8 +1005,22 @@ private fun TradeDialog(
                     ) { Text("卖出") }
                 }
                 if (!isBuy) {
+                    Spacer(Modifier.height(6.dp))
+                    // 卖出匹配策略可选项（默认最低价优先）
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("匹配批次", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                        Spacer(Modifier.width(8.dp))
+                        SellMatch.entries.forEach { m ->
+                            FilterChip(
+                                selected = sellMatch == m,
+                                onClick = { onSellMatch(m) },
+                                label = { Text(m.label, fontSize = 12.sp) }
+                            )
+                            Spacer(Modifier.width(6.dp))
+                        }
+                    }
                     Spacer(Modifier.height(4.dp))
-                    HintText("当前持仓 $totalQty 股，支持分批卖出（按最低价优先匹配）")
+                    HintText("当前持仓 $totalQty 股，支持分批卖出（按${sellMatch.label}匹配）")
                 }
                 Spacer(Modifier.height(10.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1081,7 +1101,7 @@ private fun LotRow(lp: com.example.stocktracker.LotPnl, currentPrice: Double?) {
 
 // ---------------- 交易记录卡片（默认 3 条，点击"查看全部"原地展开；已清仓的记录置灰） ----------------
 @Composable
-private fun HistoryPreviewCard(trades: List<com.example.stocktracker.TradeRecord>) {
+private fun HistoryPreviewCard(trades: List<com.example.stocktracker.TradeRecord>, onUndo: () -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     val clearedIds = remember(trades) { clearedTradeIds(trades) }
     SectionCard(title = "交易记录") {
@@ -1099,6 +1119,11 @@ private fun HistoryPreviewCard(trades: List<com.example.stocktracker.TradeRecord
                     modifier = Modifier.fillMaxWidth()
                 ) { Text(if (expanded) "收起" else "查看全部 ${trades.size} 条") }
             }
+            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+            TextButton(
+                onClick = onUndo,
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("撤销最后一笔交易", fontSize = 12.sp, color = MaterialTheme.colorScheme.error) }
         }
     }
 }
@@ -1351,71 +1376,80 @@ private fun HomeScreen(
     onIntraday: () -> Unit,
     onRefreshTrend: () -> Unit,
     onTrade: () -> Unit,
+    onUndo: () -> Unit,
     onClear: () -> Unit
 ) {
-    LazyColumn(
-        modifier = Modifier
+    Column(
+        Modifier
             .fillMaxSize()
             .padding(padding)
             .padding(horizontal = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        contentPadding = PaddingValues(vertical = 8.dp)
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        if (state.accounts.isEmpty()) {
-            item {
-                OutlinedButton(
-                    onClick = onAdd,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(Icons.Default.Add, contentDescription = null)
-                    Spacer(Modifier.width(6.dp))
-                    Text("添加股票（输入代码自动查询名称）")
-                }
-            }
-        } else {
-            item { AccountPnlBar(state, onRefreshAll = onRefreshAll) }
-            item {
-                StockSelector(
-                    accounts = state.accounts,
-                    selectedIndex = state.selectedIndex,
-                    onSelect = onSelect,
-                    onAddClick = onAdd
-                )
-            }
+        // 账户总盈亏置顶固定（不随列表滚动），下方列表可滚动
+        if (state.accounts.isNotEmpty()) {
+            AccountPnlBar(state, onRefreshAll = onRefreshAll)
         }
-        if (acc == null) {
-            // 无选中股票时只有添加按钮，无需其他提示
-        } else {
-            item {
-                StockOverviewPager(
-                    accounts = state.accounts,
-                    selectedIndex = state.selectedIndex,
-                    onSelect = onSelect,
-                    onEditPrice = onEditPrice,
-                    onRefresh = onRefreshPrice,
-                    onIntraday = onIntraday
-                )
-            }
-            item {
-                if (acc != null) {
-                    WeeklyTrendCard(weekUi = weekUi, onRefresh = onRefreshTrend)
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(vertical = 8.dp)
+        ) {
+            if (state.accounts.isEmpty()) {
+                item {
+                    OutlinedButton(
+                        onClick = onAdd,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("添加股票（输入代码自动查询名称）")
+                    }
+                }
+            } else {
+                item {
+                    StockSelector(
+                        accounts = state.accounts,
+                        selectedIndex = state.selectedIndex,
+                        onSelect = onSelect,
+                        onAddClick = onAdd
+                    )
                 }
             }
-            item { HoldingsCard(acc) }
-            item { HistoryPreviewCard(acc.trades) }
-            item {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Button(
-                        onClick = onTrade,
-                        modifier = Modifier.weight(1f)
-                    ) { Text("交易", fontWeight = FontWeight.Bold) }
-                    OutlinedButton(
-                        onClick = onClear,
-                        modifier = Modifier.weight(1f)
-                    ) { Text("清空/删除") }
+            if (acc == null) {
+                // 无选中股票时只有添加按钮，无需其他提示
+            } else {
+                item {
+                    StockOverviewPager(
+                        accounts = state.accounts,
+                        selectedIndex = state.selectedIndex,
+                        onSelect = onSelect,
+                        onEditPrice = onEditPrice,
+                        onRefresh = onRefreshPrice,
+                        onIntraday = onIntraday
+                    )
+                }
+                item {
+                    if (acc != null) {
+                        WeeklyTrendCard(weekUi = weekUi, onRefresh = onRefreshTrend)
+                    }
+                }
+                item { HoldingsCard(acc) }
+                item { HistoryPreviewCard(acc.trades, onUndo = onUndo) }
+                item {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = onTrade,
+                            modifier = Modifier.weight(1f)
+                        ) { Text("交易", fontWeight = FontWeight.Bold) }
+                        OutlinedButton(
+                            onClick = onClear,
+                            modifier = Modifier.weight(1f)
+                        ) { Text("清空/删除") }
+                    }
                 }
             }
         }

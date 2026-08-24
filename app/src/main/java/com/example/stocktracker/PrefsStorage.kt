@@ -54,6 +54,18 @@ private fun buildState(s: StockState): String {
         }
         val trades = JSONArray()
         acc.trades.forEach { t ->
+            val soldArr = JSONArray()
+            t.soldLots.forEach { sl ->
+                soldArr.put(
+                    JSONObject()
+                        .put("lotId", sl.lotId)
+                        .put("qty", sl.qty)
+                        .put("price", sl.price)
+                        .put("originalQty", sl.originalQty)
+                        .put("time", sl.time)
+                        .put("fee", sl.fee)
+                )
+            }
             trades.put(
                 JSONObject()
                     .put("id", t.id)
@@ -64,6 +76,8 @@ private fun buildState(s: StockState): String {
                     .put("time", t.time)
                     .put("fee", t.fee)
                     .put("costFee", t.costFee)
+                    .put("lotId", t.lotId ?: JSONObject.NULL)
+                    .put("soldLots", soldArr)
             )
         }
         accounts.put(
@@ -78,7 +92,11 @@ private fun buildState(s: StockState): String {
                 .put("trades", trades)
         )
     }
-    return JSONObject().put("accounts", accounts).put("selectedIndex", s.selectedIndex).toString()
+    return JSONObject()
+        .put("accounts", accounts)
+        .put("selectedIndex", s.selectedIndex)
+        .put("sellMatch", s.sellMatch.name)
+        .toString()
 }
 
 private fun parseState(raw: String): StockState {
@@ -97,7 +115,18 @@ private fun parseState(raw: String): StockState {
         val tradesArr = a.getJSONArray("trades")
         for (j in 0 until tradesArr.length()) {
             val t = tradesArr.getJSONObject(j)
-            trades.add(TradeRecord(t.getLong("id"), TradeType.valueOf(t.getString("type")), t.getDouble("price"), t.getInt("qty"), t.getDouble("profit"), t.getLong("time"), t.optDouble("fee", 0.0), t.optDouble("costFee", 0.0)))
+            val soldArr = t.optJSONArray("soldLots") ?: JSONArray()
+            val soldLots = mutableListOf<SoldLot>()
+            for (k in 0 until soldArr.length()) {
+                val sl = soldArr.getJSONObject(k)
+                soldLots.add(SoldLot(sl.getLong("lotId"), sl.getInt("qty"), sl.getDouble("price"), sl.getInt("originalQty"), sl.optLong("time", 0L), sl.optDouble("fee", 0.0)))
+            }
+            trades.add(TradeRecord(
+                t.getLong("id"), TradeType.valueOf(t.getString("type")), t.getDouble("price"), t.getInt("qty"),
+                t.getDouble("profit"), t.getLong("time"), t.optDouble("fee", 0.0), t.optDouble("costFee", 0.0),
+                lotId = if (t.isNull("lotId")) null else t.optLong("lotId", 0L).let { if (it == 0L) null else it },
+                soldLots = soldLots
+            ))
         }
         accounts.add(
             StockAccount(
@@ -111,5 +140,7 @@ private fun parseState(raw: String): StockState {
         )
     }
     val sel = if (accounts.isEmpty()) -1 else root.optInt("selectedIndex", 0)
-    return StockState(accounts = accounts, selectedIndex = sel)
+    val sellMatch = runCatching { SellMatch.valueOf(root.optString("sellMatch", "LOWEST")) }
+        .getOrDefault(SellMatch.LOWEST)
+    return StockState(accounts = accounts, selectedIndex = sel, sellMatch = sellMatch)
 }

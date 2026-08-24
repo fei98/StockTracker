@@ -3,6 +3,7 @@ package com.example.stocktracker
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 
 /**
@@ -10,6 +11,9 @@ import org.junit.Test
  * 多股票隔离、股票添加、行情解析、市场判断及各类边界条件
  */
 class StockViewModelTest {
+
+    @get:Rule
+    val main = MainDispatcherRule()
 
     private fun newVm() = StockViewModel(initialFeeConfig = ZERO_FEE)
 
@@ -770,5 +774,159 @@ class StockViewModelTest {
         assertEquals(10, vm2.state.value.selected!!.sellableQty)
         vm2.sell(210.0, 10)
         assertEquals(100.0, vm2.state.value.selected!!.trades.last().profit, 0.0001)
+    }
+
+    // ---------------- 卖出匹配策略（最低价优先默认 / 最高价优先可选） ----------------
+
+    @Test
+    fun 卖出匹配_默认最低价优先() {
+        val vm = vmWithBuys(1.0 to 100, 3.0 to 300, 5.0 to 200)
+        assertEquals(SellMatch.LOWEST, vm.state.value.sellMatch)
+        vm.sell(4.0, 300)
+        // 最低价：抵1元100(+300) + 3元200(+200) = 500
+        assertEquals(500.0, vm.state.value.selected!!.trades.last().profit, 0.0001)
+    }
+
+    @Test
+    fun 卖出匹配_切换为最高价优先并保存() {
+        val fake = FakeStorage()
+        val vm = StockViewModel(fake)
+        vm.addStock(quote())
+        vm.setSellMatch(SellMatch.HIGHEST)
+        assertEquals(SellMatch.HIGHEST, vm.state.value.sellMatch)
+        assertEquals(SellMatch.HIGHEST, fake.saved.last().sellMatch)
+        assertTrue(vm.state.value.message!!.contains("最高价"))
+    }
+
+    @Test
+    fun 卖出_最高价优先_先卖最贵的批次() {
+        val vm = vmWithBuys(1.0 to 100, 3.0 to 300, 5.0 to 200)
+        vm.setSellMatch(SellMatch.HIGHEST)
+        vm.sell(4.0, 300)
+        val acc = vm.state.value.selected!!
+        // 最高价：抵5元200(-200) + 3元100(+100) = -100；剩 1元100 + 3元200
+        assertEquals(-100.0, acc.trades.last().profit, 0.0001)
+        val byPrice = acc.holdings.sortedBy { it.price }
+        assertEquals(2, byPrice.size)
+        assertEquals(1.0, byPrice[0].price, 0.0001)
+        assertEquals(100, byPrice[0].remainingQty)
+        assertEquals(3.0, byPrice[1].price, 0.0001)
+        assertEquals(200, byPrice[1].remainingQty)
+    }
+
+    // ---------------- 交易撤销 ----------------
+
+    @Test
+    fun 买入_交易记录带批次id() {
+        val vm = vmWithStock()
+        vm.buy(3.0, 100)
+        val acc = vm.state.value.selected!!
+        assertEquals(acc.holdings[0].id, acc.trades[0].lotId)
+    }
+
+    @Test
+    fun 撤销_买入_移除批次并退回手续费() {
+        val vm = newVm()
+        vm.addStock(quote())
+        vm.buy(3.0, 100)
+        vm.undoLastTrade()
+        val acc = vm.state.value.selected!!
+        assertTrue(acc.holdings.isEmpty())
+        assertTrue(acc.trades.isEmpty())
+        assertEquals(0.0, acc.totalBuyFee, 0.0001)
+        assertTrue(vm.state.value.message!!.contains("撤销"))
+    }
+
+    @Test
+    fun 撤销_卖出_部分抵扣批次恢复() {
+        val vm = vmWithBuys(1.0 to 100, 3.0 to 300)
+        vm.sell(2.0, 150)   // 抵1元100 + 3元50，剩3元250
+        vm.undoLastTrade()
+        val acc = vm.state.value.selected!!
+        assertEquals(400, acc.totalQty)
+        val byPrice = acc.holdings.sortedBy { it.price }
+        assertEquals(2, byPrice.size)
+        assertEquals(1.0, byPrice[0].price, 0.0001)
+        assertEquals(100, byPrice[0].remainingQty)
+        assertEquals(3.0, byPrice[1].price, 0.0001)
+        assertEquals(300, byPrice[1].remainingQty)
+        assertEquals(TradeType.BUY, acc.trades.last().type)
+    }
+
+    @Test
+    fun 撤销_卖出_完全卖出的批次可原样重建() {
+        val vm = vmWithBuys(3.0 to 100)
+        vm.sell(3.5, 100)
+        assertTrue(vm.state.value.selected!!.holdings.isEmpty())
+        vm.undoLastTrade()
+        val acc = vm.state.value.selected!!
+        assertEquals(100, acc.totalQty)
+        assertEquals(1, acc.holdings.size)
+        assertEquals(3.0, acc.holdings[0].price, 0.0001)
+        assertEquals(100, acc.holdings[0].remainingQty)
+        assertEquals(1, acc.trades.size)          // 还剩那笔买入
+        assertEquals(TradeType.BUY, acc.trades[0].type)
+    }
+
+    @Test
+    fun 撤销_买入批次被部分卖出后恢复_再撤买入() {
+        val vm = vmWithBuys(3.0 to 100)
+        vm.sell(3.5, 50)   // 卖50，批次剩50
+        vm.undoLastTrade() // 撤卖出 → 批次恢复100
+        assertEquals(100, vm.state.value.selected!!.totalQty)
+        vm.undoLastTrade() // 撤买入 → 清空
+        assertTrue(vm.state.value.selected!!.holdings.isEmpty())
+        assertTrue(vm.state.value.selected!!.trades.isEmpty())
+    }
+
+    @Test
+    fun 撤销_旧数据卖出无明细_拒绝() {
+        val fake = FakeStorage().apply {
+            loaded = StockState(
+                accounts = listOf(
+                    StockAccount(
+                        stock = Stock("000001", "平安银行", "sz"),
+                        holdings = emptyList(),
+                        trades = listOf(
+                            TradeRecord(1, TradeType.BUY, 3.0, 100, time = 0L),
+                            TradeRecord(2, TradeType.SELL, 3.5, 100, profit = 50.0, time = 1L)
+                        )
+                    )
+                ),
+                selectedIndex = 0
+            )
+        }
+        val vm = StockViewModel(fake)
+        vm.undoLastTrade()
+        assertTrue(vm.state.value.message!!.contains("无法撤销"))
+        assertEquals(2, vm.state.value.selected!!.trades.size)
+    }
+
+    @Test
+    fun 撤销_旧数据买入无批次id_拒绝() {
+        val fake = FakeStorage().apply {
+            loaded = StockState(
+                accounts = listOf(
+                    StockAccount(
+                        stock = Stock("000001", "平安银行", "sz"),
+                        holdings = listOf(BuyLot(1L, 3.0, 100, 100)),
+                        trades = listOf(TradeRecord(1, TradeType.BUY, 3.0, 100, time = 0L))
+                    )
+                ),
+                selectedIndex = 0
+            )
+        }
+        val vm = StockViewModel(fake)
+        vm.undoLastTrade()
+        assertTrue(vm.state.value.message!!.contains("无法撤销"))
+        assertEquals(1, vm.state.value.selected!!.trades.size)
+        assertEquals(100, vm.state.value.selected!!.totalQty)
+    }
+
+    @Test
+    fun 撤销_无交易_提示() {
+        val vm = vmWithStock()
+        vm.undoLastTrade()
+        assertTrue(vm.state.value.message!!.contains("没有可撤销"))
     }
 }

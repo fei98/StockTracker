@@ -41,6 +41,8 @@ fun dayLabel(time: Long, now: Long = System.currentTimeMillis()): String? {
  * 交易记录（用于历史展示）
  * @param fee 本次手续费：买入 = 买入费；卖出 = 卖出费（佣金+印花税+过户费）
  * @param costFee 仅卖出有意义：被卖出批次分摊的买入手续费
+ * @param lotId 仅买入有意义：该笔买入对应的持仓批次 id（撤销买入用）
+ * @param soldLots 仅卖出有意义：被抵扣的批次明细快照（撤销卖出用，含批次属性以便完全卖出批次可重建）
  */
 data class TradeRecord(
     val id: Long,
@@ -50,13 +52,69 @@ data class TradeRecord(
     val profit: Double = 0.0, // 仅卖出时有意义：本次卖出实现盈亏（裸价，不含任何费用）
     val time: Long = System.currentTimeMillis(),
     val fee: Double = 0.0,
-    val costFee: Double = 0.0
+    val costFee: Double = 0.0,
+    val lotId: Long? = null,
+    val soldLots: List<SoldLot> = emptyList()
 ) {
     /** 本次交易成本：买入 = 成交金额；卖出 = 被卖出持仓对应的裸成本（成交金额 - 盈亏） */
     val cost: Double get() = if (type == TradeType.BUY) price * qty else price * qty - profit
 
     /** 卖出净盈亏（扣本笔卖出费 + 被卖批次分摊的买入费）；买入为 0 */
     val netProfit: Double get() = if (type == TradeType.SELL) profit - fee - costFee else 0.0
+}
+
+/** 卖出匹配策略：最低价优先（默认，先卖最便宜的批次）/ 最高价优先（先卖最贵的批次） */
+enum class SellMatch(val label: String) {
+    LOWEST("最低价优先"), HIGHEST("最高价优先")
+}
+
+/** 卖出被抵扣的批次明细快照（撤销卖出用）：含批次属性，便于已完全卖出的批次可原样重建 */
+data class SoldLot(
+    val lotId: Long,
+    val qty: Int,
+    val price: Double,
+    val originalQty: Int,
+    val time: Long,
+    val fee: Double
+)
+
+/** 卖出匹配结果 */
+data class SellMatchResult(
+    val remaining: List<BuyLot>,   // 卖出后的持仓
+    val profit: Double,            // 裸价盈亏
+    val costFee: Double,           // 被卖批次分摊的买入费
+    val soldLots: List<SoldLot>    // 被抵扣批次明细（撤销用）
+)
+
+/**
+ * 按策略匹配卖出批次（纯函数）：
+ * - LOWEST：持仓按单价从低到高抵扣（先卖最便宜的）
+ * - HIGHEST：持仓按单价从高到低抵扣（先卖最贵的）
+ */
+fun matchSellLots(holdings: List<BuyLot>, qty: Int, price: Double, strategy: SellMatch): SellMatchResult {
+    val ordered = when (strategy) {
+        SellMatch.LOWEST -> holdings.sortedBy { it.price }
+        SellMatch.HIGHEST -> holdings.sortedByDescending { it.price }
+    }
+    var toSell = qty
+    var profit = 0.0
+    var costFee = 0.0
+    val soldLots = mutableListOf<SoldLot>()
+    val remaining = mutableListOf<BuyLot>()
+    for (lot in ordered) {
+        if (toSell <= 0) {
+            remaining.add(lot)
+            continue
+        }
+        val take = minOf(lot.remainingQty, toSell)
+        profit += (price - lot.price) * take
+        if (lot.originalQty > 0) costFee += lot.fee * take / lot.originalQty
+        soldLots += SoldLot(lot.id, take, lot.price, lot.originalQty, lot.time, lot.fee)
+        toSell -= take
+        val left = lot.remainingQty - take
+        if (left > 0) remaining.add(lot.copy(remainingQty = left))
+    }
+    return SellMatchResult(remaining, profit, costFee, soldLots)
 }
 
 /**
@@ -224,7 +282,9 @@ data class StockState(
     val searchedCode: String? = null,
     /** 查询结果提示：未找到 / 已在列表中（查询成功时为 null） */
     val searchHint: String? = null,
-    val message: String? = null
+    val message: String? = null,
+    /** 卖出匹配策略（全局偏好，默认最低价优先） */
+    val sellMatch: SellMatch = SellMatch.LOWEST
 ) {
     /** 当前选中的股票账户 */
     val selected: StockAccount? get() = accounts.getOrNull(selectedIndex)
@@ -279,20 +339,22 @@ fun recalcHistoricalFees(s: StockState, feeConfig: FeeConfig): StockState {
             if (t.type == TradeType.BUY) {
                 val fee = feeConfig.buyFee(t.price * t.qty)
                 lots += LotState(t.id, t.price, t.qty, t.qty, t.time, fee)
-                t.copy(fee = fee)
+                t.copy(fee = fee, lotId = t.id)
             } else {
                 // 最低价优先匹配全部批次（不区分买入日期）
                 var toSell = t.qty
                 var costFee = 0.0
+                val soldLots = mutableListOf<SoldLot>()
                 val sellable = lots.sortedBy { it.price }
                 for (lot in sellable) {
                     if (toSell <= 0) break
                     val take = minOf(lot.remainingQty, toSell)
                     if (lot.originalQty > 0) costFee += lot.fee * take / lot.originalQty
+                    soldLots += SoldLot(lot.id, take, lot.price, lot.originalQty, lot.time, lot.fee)
                     lot.remainingQty -= take
                     toSell -= take
                 }
-                t.copy(fee = feeConfig.sellFee(t.price * t.qty), costFee = costFee)
+                t.copy(fee = feeConfig.sellFee(t.price * t.qty), costFee = costFee, soldLots = soldLots)
             }
         }
         val holdings = lots.filter { it.remainingQty > 0 }
