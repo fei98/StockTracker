@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -55,7 +56,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -97,15 +97,19 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.stocktracker.FeeConfig
@@ -479,6 +483,7 @@ private fun StockSelector(
     onAddClick: () -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
+    var triggerHeight by remember { mutableStateOf(0) }
     val selected = accounts.getOrNull(selectedIndex)
     Box {
         Surface(
@@ -488,7 +493,9 @@ private fun StockSelector(
             border = androidx.compose.foundation.BorderStroke(
                 1.dp, MaterialTheme.colorScheme.outlineVariant
             ),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .onSizeChanged { triggerHeight = it.height }
         ) {
             Row(
                 Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
@@ -516,31 +523,60 @@ private fun StockSelector(
                 )
             }
         }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            accounts.forEachIndexed { i, acc ->
-                DropdownMenuItem(
-                    text = {
-                        Text(
-                            acc.stock.name,
-                            fontSize = 14.sp,
-                            color = if (i == selectedIndex) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurface
+        // 自绘下拉菜单（Popup）：M3 DropdownMenu 内部用 IntrinsicSize.Max 测量宽度，
+        // 放滚动容器会崩（Lazy/verticalScroll 都不支持），故用 Popup 自实现，Popup 给有限约束可正常滚动
+        if (expanded) {
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, triggerHeight),
+                onDismissRequest = { expanded = false },
+                properties = PopupProperties(focusable = true)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    shadowElevation = 8.dp,
+                    tonalElevation = 8.dp,
+                    border = androidx.compose.foundation.BorderStroke(
+                        1.dp, MaterialTheme.colorScheme.outlineVariant
+                    )
+                ) {
+                    // 股票多时菜单会超高：「添加股票」置顶保证始终可见，列表限高滚动
+                    Column(
+                        Modifier
+                            .widthIn(min = 200.dp, max = 360.dp)
+                            .heightIn(max = 420.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        DropdownMenuItem(
+                            text = {
+                                Text("＋ 添加股票", fontSize = 14.sp, color = MaterialTheme.colorScheme.primary)
+                            },
+                            onClick = {
+                                expanded = false
+                                onAddClick()
+                            }
                         )
-                    },
-                    onClick = {
-                        onSelect(i)
-                        expanded = false
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f))
+                        accounts.forEachIndexed { i, acc ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        acc.stock.name,
+                                        fontSize = 14.sp,
+                                        color = if (i == selectedIndex) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurface
+                                    )
+                                },
+                                onClick = {
+                                    onSelect(i)
+                                    expanded = false
+                                }
+                            )
+                        }
                     }
-                )
-            }
-            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f))
-            DropdownMenuItem(
-                text = { Text("＋ 添加股票", fontSize = 14.sp) },
-                onClick = {
-                    expanded = false
-                    onAddClick()
                 }
-            )
+            }
         }
     }
 }
