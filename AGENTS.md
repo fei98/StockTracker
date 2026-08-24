@@ -34,6 +34,7 @@ adb install -r app\build\outputs\apk\debug\app-debug.apk
 1. 在开发者同意代码提交之后，每次提交前必须**检查版本号（versionCode / versionName）是否需要更新**。
 2. 除非是同一轮迭代中的小修改，否则版本号应递增（versionName 小数位 +1，如 3.11 → 3.12，versionCode +1）。
 3. **有源码改动（版本号递增）的推送必须发布**：凡包含源码改动并递增版本号（`versionName`）的推送，`git push` 前必须先把对应版本号（`v{versionName}`，如 `v3.13`）的构建产物（apk）发布到仓库的 `GitHub Releases`：`https://github.com/fei98/StockTracker/releases/`。发布即创建 tag 并附 `app\build\outputs\apk\debug\app-debug.apk`（用 `gh release create`）；若漏发，则本次推送视为未完成，需要先补发。**纯文档/无源码改动（版本号不变）的推送无需发布**。
+4. **push 失败处理**：`git push` 不成功时，过一小会**只重试一次**；仍失败则**停止，不排查原因**（多为 GitHub 访问不稳定），等待下次推送时再推。不要反复重试、不要改动网络/代理配置。
 4. 版本号更新后，需要将构建产物（apk）发布到仓库的 `GitHub Releases`：`https://github.com/fei98/StockTracker/releases/`。
 
 ## 四、仓库信息
