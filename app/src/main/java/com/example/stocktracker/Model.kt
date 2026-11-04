@@ -118,12 +118,13 @@ fun matchSellLots(holdings: List<BuyLot>, qty: Int, price: Double, strategy: Sel
 }
 
 /**
- * 券商 T+1 视角的可卖数量（A 股）：按时间序重放交易，模拟券商"卖出只先抵当时可卖（非当日买入）批次"，
- * 得到每批次（按 id）的"券商剩余"；再与当前持仓对齐：能对齐的批次用券商剩余，缺 trades 的批次用持仓剩余。
+ * Replays trades using the broker's T+1 rules, consuming mature lots before same-day buys.
  *
- * 与 App 记账（最低价优先、不限 T+1）解耦：解决"当日补仓低价后被卖出时，App 抵用冻结批次、
- * 剩余可卖批次实际是券商已卖出的部分，导致可卖数虚高"的问题。
- * 关键："当时可卖"用每笔卖出的时刻判定（而非最终 now），避免历史时点冻结状态错乱。
+ * Broker and accounting lots can differ after intraday trading or a different sell strategy.
+ * Sum broker balances independently, including lots no longer present in accounting holdings.
+ * Holdings without a matching buy record retain their date-based fallback. The result is
+ * capped at the current position size so incomplete history cannot overstate availability.
+ * Each sale uses its own timestamp to determine which lots were mature at that point.
  */
 fun brokerSellableQty(holdings: List<BuyLot>, trades: List<TradeRecord>, now: Long): Int {
     class Lot(val id: Long, val price: Double, val time: Long, var remaining: Int)
@@ -154,11 +155,15 @@ fun brokerSellableQty(holdings: List<BuyLot>, trades: List<TradeRecord>, now: Lo
             }
         }
     }
-    val brokerRemaining = lots.associate { it.id to it.remaining }
-    return holdings.sumOf { lot ->
-        val rem = brokerRemaining[lot.id] ?: lot.remainingQty
-        if (!isSameDay(lot.time, now)) rem else 0
+    val replayedLotIds = lots.mapTo(mutableSetOf()) { it.id }
+    val brokerSellable = lots.sumOf { lot ->
+        if (!isSameDay(lot.time, now)) lot.remaining else 0
     }
+    val unrecordedSellable = holdings.sumOf { lot ->
+        if (lot.id !in replayedLotIds && !isSameDay(lot.time, now)) lot.remainingQty else 0
+    }
+    val totalQty = holdings.sumOf { it.remainingQty }.coerceAtLeast(0)
+    return (brokerSellable + unrecordedSellable).coerceIn(0, totalQty)
 }
 
 /**
