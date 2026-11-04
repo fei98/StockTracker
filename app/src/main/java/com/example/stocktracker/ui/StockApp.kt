@@ -130,6 +130,7 @@ import com.example.stocktracker.StockViewModel
 import com.example.stocktracker.ThemePreference
 import com.example.stocktracker.TradeType
 import com.example.stocktracker.TradePlanOrder
+import com.example.stocktracker.triggeredPlanEntries
 import com.example.stocktracker.TrendOutcome
 import com.example.stocktracker.UpdateChecker
 import com.example.stocktracker.WeeklyTrendResult
@@ -292,6 +293,7 @@ fun StockApp() {
                 1 -> OverviewScreen(
                     padding = padding,
                     accounts = state.accounts,
+                    feeConfig = vm.feeConfig,
                     weekUi = weekUi,
                     onRefreshTrends = { weekVm.refreshAll(state.accounts) },
                     onRefreshData = { vm.refreshAll() },
@@ -1683,15 +1685,17 @@ private enum class RealizedGranularity { MONTH, DAY, YEAR }
 private fun OverviewScreen(
     padding: PaddingValues,
     accounts: List<StockAccount>,
+    feeConfig: FeeConfig,
     weekUi: WeeklyTrendViewModel.UiState,
     onRefreshTrends: () -> Unit,
     onRefreshData: () -> Unit,
     onOpenStock: (Int) -> Unit
 ) {
-    // 标签顺序：浮盈 → 周趋势 → 已实现 → 交易 → 市值 → 股数（null 表示周趋势）
+    // Null represents the weekly trend tab; triggered plans occupy the third position.
     val tabEntries: List<OverviewTab?> = listOf(
         OverviewTab.FLOAT,
         null,
+        OverviewTab.TRIGGERED,
         OverviewTab.REALIZED,
         OverviewTab.TRADES,
         OverviewTab.VALUE,
@@ -1716,7 +1720,7 @@ private fun OverviewScreen(
     }
     // 按 |值| 从大到小排序展示（市值即按大小，浮盈/已实现按绝对值）
     val entries = remember(accounts, dataTab, realizedRange) {
-        if (dataTab == null || dataTab == OverviewTab.TRADES) emptyList()
+        if (dataTab == null || dataTab == OverviewTab.TRADES || dataTab == OverviewTab.TRIGGERED) emptyList()
         else if (dataTab == OverviewTab.REALIZED) realizedEntriesInRange(accounts, realizedRange)
             .sortedByDescending { kotlin.math.abs(it.value) }
         else overviewEntries(accounts, dataTab).sortedByDescending { kotlin.math.abs(it.value) }
@@ -1727,6 +1731,12 @@ private fun OverviewScreen(
         accounts.associate { acc -> acc.stock.name to acc.dayChangePct }
     }
     val total = entries.sumOf { kotlin.math.abs(it.value) }
+    val triggered = remember(accounts, feeConfig, dataTab) {
+        if (dataTab == OverviewTab.TRIGGERED) triggeredPlanEntries(accounts, feeConfig) else emptyList()
+    }
+    LaunchedEffect(dataTab) {
+        if (dataTab == OverviewTab.TRIGGERED) onRefreshData()
+    }
     // 进入"周趋势"标签刷新一次（多日维度，无需 30 秒自动刷新）
     LaunchedEffect(isPredict) {
         if (isPredict) onRefreshTrends()
@@ -1800,6 +1810,7 @@ private fun OverviewScreen(
                 if (isPredict) "周趋势预测（未来 5 个交易日）"
                 else if (dataTab == OverviewTab.REALIZED) "已实现 · ${realizedRangeLabel(realizedRange)}"
                 else if (dataTab == OverviewTab.TRADES) "全部交易记录（最新在上）"
+                else if (dataTab == OverviewTab.TRIGGERED) "已触发 · ${triggered.size}只股票"
                 else "${dataTab?.label}（按持仓占比）",
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
@@ -1847,6 +1858,8 @@ private fun OverviewScreen(
         }
         if (isPredict) {
             WeeklyTrendPanel(weekUi)
+        } else if (dataTab == OverviewTab.TRIGGERED) {
+            TriggeredPlansPanel(triggered, onOpenStock, Modifier.weight(1f))
         } else if (dataTab == OverviewTab.TRADES) {
             if (accounts.isEmpty()) EmptyText("暂无股票数据") else TradesSummaryList(accounts, Modifier.weight(1f))
         } else if (accounts.isEmpty()) {

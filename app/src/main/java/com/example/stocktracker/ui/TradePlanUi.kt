@@ -1,5 +1,6 @@
 package com.example.stocktracker.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -8,6 +9,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -42,6 +45,7 @@ import com.example.stocktracker.StockAccount
 import com.example.stocktracker.TradePlanConfig
 import com.example.stocktracker.TradePlanOrder
 import com.example.stocktracker.TradePlanResult
+import com.example.stocktracker.TriggeredPlanEntry
 import com.example.stocktracker.TradeType
 import com.example.stocktracker.evaluateTradePlan
 import com.example.stocktracker.formatMoney
@@ -176,6 +180,48 @@ private fun PlanOrderRow(order: TradePlanOrder, onTrade: (TradePlanOrder) -> Uni
 @Composable
 private fun PlanHint(text: String) {
     Text(text, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
+@Composable
+internal fun TriggeredPlansPanel(
+    entries: List<TriggeredPlanEntry>,
+    onOpenStock: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        PlanHint("按当前显示现价筛选；未设置提醒或现价未知的股票不参与。")
+        if (entries.isEmpty()) {
+            Text("暂无已触发的买卖提醒", modifier = Modifier.padding(vertical = 20.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(bottom = 8.dp)) {
+                items(entries, key = { it.stock.marketCode }) { entry ->
+                    Card(Modifier.fillMaxWidth().clickable { onOpenStock(entry.accountIndex) },
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(entry.stock.name, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                                    PlanHint(entry.stock.marketCode)
+                                }
+                                Text("现价 ¥${formatPrice(entry.currentPrice)}", fontSize = 12.sp)
+                            }
+                            entry.orders.forEach { order ->
+                                val direction = if (order.direction == PlanDirection.UP) "上涨" else "下跌"
+                                val side = if (order.type == TradeType.BUY) "买入" else "卖出"
+                                Text("$direction ¥${formatPrice(order.price!!)} · $side ${order.qty}股",
+                                    fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                                    color = if (order.direction == PlanDirection.UP) UpColor else DownColor)
+                            }
+                            PlanHint("点击查看该股票")
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable

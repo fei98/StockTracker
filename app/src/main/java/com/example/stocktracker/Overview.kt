@@ -8,7 +8,8 @@ enum class OverviewTab(val label: String) {
     VALUE("市值"),
     REALIZED("已实现"),
     SHARES("股数"),
-    TRADES("交易")
+    TRADES("交易"),
+    TRIGGERED("已触发")
 }
 
 /** 总览单项（一只股票的某个口径） */
@@ -20,7 +21,7 @@ fun overviewEntries(accounts: List<StockAccount>, tab: OverviewTab): List<Overvi
     OverviewTab.VALUE -> accounts.map { OverviewEntry(it.stock.name, it.marketValue) }
     OverviewTab.REALIZED -> accounts.map { OverviewEntry(it.stock.name, it.realizedPnlFee) }
     OverviewTab.SHARES -> accounts.map { OverviewEntry(it.stock.name, it.totalQty.toDouble()) }
-    OverviewTab.TRADES -> emptyList() // 交易汇总走独立列表（非数值聚合）
+    OverviewTab.TRADES, OverviewTab.TRIGGERED -> emptyList()
 }
 
 /** 全部股票交易记录合并，按时间倒序（最新在前），每项 (股票, 交易) */

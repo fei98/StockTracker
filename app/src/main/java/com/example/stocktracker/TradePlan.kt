@@ -47,6 +47,23 @@ data class TradePlanResult(
     val downward: TradePlanOrder
 )
 
+data class TriggeredPlanEntry(
+    val accountIndex: Int,
+    val stock: Stock,
+    val currentPrice: Double,
+    val orders: List<TradePlanOrder>
+)
+
+/** Groups currently reached, valid orders by stock, retaining account order and navigation indexes. */
+fun triggeredPlanEntries(accounts: List<StockAccount>, feeConfig: FeeConfig): List<TriggeredPlanEntry> =
+    accounts.mapIndexedNotNull { index, account ->
+        val currentPrice = account.currentPrice?.takeIf { it.isFinite() && it > 0 }
+            ?: return@mapIndexedNotNull null
+        val plan = evaluateTradePlan(account, feeConfig) ?: return@mapIndexedNotNull null
+        val orders = listOf(plan.upward, plan.downward).filter { it.reached && it.block == null }
+        if (orders.isEmpty()) null else TriggeredPlanEntry(index, account.stock, currentPrice, orders)
+    }
+
 /** Three-decimal prices match the precision supported by the transaction editor. */
 private fun planPrice(base: Double, config: TradePlanConfig, up: Boolean): Double? {
     val baseValue = BigDecimal.valueOf(base)
