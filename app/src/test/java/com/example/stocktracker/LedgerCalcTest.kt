@@ -74,4 +74,87 @@ class LedgerCalcTest {
         assertTrue(cleared == setOf(1L, 2L, 11L))
         assertTrue(3L !in cleared)
     }
+
+    private fun recordedBuy(tradeId: Long, lotId: Long, price: Double, qty: Int = 100) =
+        TradeRecord(tradeId, TradeType.BUY, price, qty, time = 0L, lotId = lotId)
+
+    private fun snapshot(lotId: Long, price: Double, qty: Int, originalQty: Int = qty) =
+        SoldLot(lotId, qty, price, originalQty, 0L, 0.0)
+
+    private fun recordedSell(id: Long, qty: Int, vararg lots: SoldLot) =
+        TradeRecord(id, TradeType.SELL, 10.353, qty, time = 0L, soldLots = lots.toList())
+
+    @Test
+    fun highestPriceSaleClearsItsActualBuyTradeInsteadOfTheLowestPriceTrade() {
+        val trades = listOf(
+            recordedBuy(226, 225, 13.0), recordedBuy(234, 233, 10.564),
+            recordedSell(235, 100, snapshot(225, 13.0, 100))
+        )
+        assertEquals(setOf(226L, 235L), clearedTradeIds(trades))
+    }
+
+    @Test
+    fun explicitLowestPriceSaleLeavesTheHigherPriceBuyUncleared() {
+        val trades = listOf(
+            recordedBuy(1, 101, 13.0), recordedBuy(2, 102, 10.0),
+            recordedSell(3, 100, snapshot(102, 10.0, 100))
+        )
+        assertEquals(setOf(2L, 3L), clearedTradeIds(trades))
+    }
+
+    @Test
+    fun mixedHighestAndLowestSalesFollowEachSavedSnapshot() {
+        val trades = listOf(
+            recordedBuy(1, 101, 13.0), recordedBuy(2, 102, 12.0), recordedBuy(3, 103, 10.0),
+            recordedSell(4, 100, snapshot(101, 13.0, 100)),
+            recordedSell(5, 100, snapshot(103, 10.0, 100))
+        )
+        assertEquals(setOf(1L, 3L, 4L, 5L), clearedTradeIds(trades))
+    }
+
+    @Test
+    fun partiallyConsumedHighestPriceLotIsNotCleared() {
+        val trades = listOf(
+            recordedBuy(1, 101, 13.0, 200), recordedBuy(2, 102, 10.0),
+            recordedSell(3, 100, snapshot(101, 13.0, 100, 200))
+        )
+        assertEquals(emptySet<Long>(), clearedTradeIds(trades))
+    }
+
+    @Test
+    fun laterCompletionClearsAllSalesLinkedToTheNowEmptyLot() {
+        val trades = listOf(
+            recordedBuy(1, 101, 13.0, 200), recordedBuy(2, 102, 10.0),
+            recordedSell(3, 100, snapshot(101, 13.0, 100, 200)),
+            recordedSell(4, 100, snapshot(101, 13.0, 100, 200))
+        )
+        assertEquals(setOf(1L, 3L, 4L), clearedTradeIds(trades))
+    }
+
+    @Test
+    fun multiLotSaleDoesNotClearASaleWhileOneConsumedLotStillHasShares() {
+        val trades = listOf(
+            recordedBuy(1, 101, 13.0), recordedBuy(2, 102, 12.0), recordedBuy(3, 103, 10.0),
+            recordedSell(4, 150, snapshot(101, 13.0, 100), snapshot(102, 12.0, 50, 100))
+        )
+        assertEquals(setOf(1L), clearedTradeIds(trades))
+    }
+
+    @Test
+    fun anUnknownSnapshotCannotConsumeAnUnrelatedLowPriceLot() {
+        val trades = listOf(
+            recordedBuy(1, 101, 10.0),
+            recordedSell(2, 100, snapshot(999, 13.0, 100))
+        )
+        assertEquals(emptySet<Long>(), clearedTradeIds(trades))
+    }
+
+    @Test
+    fun aLegacyBuyWithoutLotIdCanStillMatchItsSavedTradeId() {
+        val trades = listOf(
+            buy(1, 13.0, 100), buy(2, 10.0, 100),
+            recordedSell(3, 100, snapshot(1, 13.0, 100))
+        )
+        assertEquals(setOf(1L, 3L), clearedTradeIds(trades))
+    }
 }

@@ -37,7 +37,7 @@ class PrefsStorage(context: Context) : Storage {
 
 // ---------------- JSON 序列化 ----------------
 
-private fun buildState(s: StockState): String {
+internal fun buildState(s: StockState): String {
     val accounts = JSONArray()
     s.accounts.forEach { acc ->
         val lots = JSONArray()
@@ -90,6 +90,16 @@ private fun buildState(s: StockState): String {
                 .put("totalBuyFee", acc.totalBuyFee)
                 .put("holdings", lots)
                 .put("trades", trades)
+                .put("tradePlan", acc.tradePlan?.let { plan ->
+                    JSONObject()
+                        .put("thresholdMode", plan.thresholdMode.name)
+                        .put("threshold", plan.threshold)
+                        .put("unitQty", plan.unitQty)
+                        .put("stepMode", plan.stepMode.name)
+                        .put("step", plan.step)
+                        .put("referencePrice", plan.referencePrice)
+                        .put("startAfterTradeId", plan.startAfterTradeId)
+                } ?: JSONObject.NULL)
         )
     }
     return JSONObject()
@@ -99,7 +109,7 @@ private fun buildState(s: StockState): String {
         .toString()
 }
 
-private fun parseState(raw: String): StockState {
+internal fun parseState(raw: String): StockState {
     val root = JSONObject(raw)
     val accountsArr = root.getJSONArray("accounts")
     val accounts = mutableListOf<StockAccount>()
@@ -135,7 +145,18 @@ private fun parseState(raw: String): StockState {
                 trades = trades,
                 currentPrice = if (a.isNull("currentPrice")) null else a.getDouble("currentPrice"),
                 prevClose = if (a.isNull("prevClose")) null else a.getDouble("prevClose"),
-                totalBuyFee = a.optDouble("totalBuyFee", 0.0)
+                totalBuyFee = a.optDouble("totalBuyFee", 0.0),
+                tradePlan = a.optJSONObject("tradePlan")?.let { plan ->
+                    runCatching {
+                        TradePlanConfig(
+                            PlanThresholdMode.valueOf(plan.getString("thresholdMode")),
+                            plan.getDouble("threshold"), plan.getInt("unitQty"),
+                            PlanStepMode.valueOf(plan.getString("stepMode")),
+                            plan.getDouble("step"), plan.getDouble("referencePrice"),
+                            plan.optLong("startAfterTradeId", 0L)
+                        )
+                    }.getOrNull()?.takeIf { it.isValid }
+                }
             )
         )
     }

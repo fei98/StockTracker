@@ -247,13 +247,18 @@ class StockViewModel(
      *   先抵扣1元100股（盈利300），再抵扣3元200股（盈利200），合计盈利500，3元剩100股。
      */
     fun sell(price: Double, qty: Int) {
+        sellWithMatch(price, qty, _state.value.sellMatch)
+    }
+
+    /** A plan-specific match applies to this trade without changing the global preference. */
+    fun sellWithMatch(price: Double, qty: Int, strategy: SellMatch) {
         if (price <= 0 || qty <= 0) { notify("请输入正确的单价和数量"); return }
         val s = _state.value
         val acc = s.selected ?: run { notify("请先添加并选择股票"); return }
         if (acc.totalQty <= 0) { notify("当前无持仓，无法卖出"); return }
         if (qty > acc.totalQty) { notify("卖出数量超过持仓数量（${acc.totalQty} 股）"); return }
 
-        val m = matchSellLots(acc.holdings, qty, price, s.sellMatch)
+        val m = matchSellLots(acc.holdings, qty, price, strategy)
 
         val sellFee = feeConfig.sellFee(price * qty)
         _state.update {
@@ -271,6 +276,13 @@ class StockViewModel(
             )
         }
         persist()
+    }
+
+    fun configureTradePlan(config: TradePlanConfig?): Boolean {
+        if (_state.value.selected == null || (config != null && !config.isValid)) return false
+        _state.update { s -> s.copy(accounts = updateSelected(s) { it.copy(tradePlan = config) }) }
+        persist()
+        return true
     }
 
     /** 切换卖出匹配策略（全局偏好，持久化；默认最低价优先） */

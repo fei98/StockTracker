@@ -218,7 +218,8 @@ data class StockAccount(
     val trades: List<TradeRecord> = emptyList(),
     val currentPrice: Double? = null,
     val prevClose: Double? = null,      // 昨收（刷新行情时记录，用于涨跌幅）
-    val totalBuyFee: Double = 0.0       // 累计买入手续费（含已卖出批次，持久化）
+    val totalBuyFee: Double = 0.0,      // Accumulated buy fees, including closed lots.
+    val tradePlan: TradePlanConfig? = null
 ) {
     /** 总持仓数量 */
     val totalQty: Int get() = holdings.sumOf { it.remainingQty }
@@ -422,34 +423,53 @@ fun pctChangeFromAvgPrice(avgPrice: Double, price: Double): Double =
     if (avgPrice > 0) (price - avgPrice) / avgPrice * 100 else 0.0
 
 /**
- * 交易记录“清仓置灰”判定：按交易时间序重放买卖，最低价优先抵扣（与 sell() 一致，不区分买入日期）。
- * 返回已清仓的交易 id 集合：
- *  - 买入：其批次剩余数量为 0（已全部卖出）→ 置灰
- *  - 卖出：所消耗的批次全部被清空 → 置灰；只部分消耗（还有批次未卖完）→ 不置灰（未卖完的批次保持正常）
+ * Replays actual sold-lot snapshots to determine which trade rows are fully closed.
+ * Legacy sales without snapshots retain lowest-price matching as a fallback.
+ * Buy rows close when their lot is empty; sale rows close only when all lots they
+ * actually consumed are now empty. Unmatched snapshots never consume unrelated lots.
  */
 fun clearedTradeIds(trades: List<TradeRecord>): Set<Long> {
-    data class Lot(val buyTradeId: Long, val price: Double, var remaining: Int)
+    class Lot(val id: Long, val buyTradeId: Long, val price: Double, var remaining: Int)
+    data class Sale(val tradeId: Long, val consumed: List<Lot>, val fullyMatched: Boolean)
     val lots = mutableListOf<Lot>()
-    val cleared = mutableSetOf<Long>()
+    val sales = mutableListOf<Sale>()
     for (t in trades) {
         when (t.type) {
-            TradeType.BUY -> lots += Lot(t.id, t.price, t.qty)
+            TradeType.BUY -> lots += Lot(t.lotId ?: t.id, t.id, t.price, t.qty)
             TradeType.SELL -> {
-                var toSell = t.qty
-                var sellCleared = true
-                for (lot in lots.sortedBy { it.price }) {
-                    if (toSell <= 0) break
-                    val take = minOf(lot.remaining, toSell)
-                    lot.remaining -= take
-                    toSell -= take
-                    if (lot.remaining > 0) sellCleared = false
+                val consumed = mutableListOf<Lot>()
+                var matchedQty = 0L
+                var fullyMatched = t.qty > 0
+                if (t.soldLots.isNotEmpty()) {
+                    for (snapshot in t.soldLots) {
+                        val lot = lots.firstOrNull { it.id == snapshot.lotId }
+                        if (lot == null || snapshot.qty <= 0) {
+                            fullyMatched = false
+                            continue
+                        }
+                        val take = minOf(lot.remaining, snapshot.qty)
+                        lot.remaining -= take
+                        matchedQty += take
+                        if (take > 0) consumed += lot
+                        if (take != snapshot.qty) fullyMatched = false
+                    }
+                } else {
+                    var toSell = t.qty
+                    for (lot in lots.sortedBy { it.price }) {
+                        if (toSell <= 0) break
+                        val take = minOf(lot.remaining, toSell)
+                        lot.remaining -= take
+                        toSell -= take
+                        matchedQty += take
+                        if (take > 0) consumed += lot
+                    }
                 }
-                if (toSell > 0) sellCleared = false // 卖出量超出历史买入（异常数据）不作为清仓
-                if (sellCleared) cleared += t.id
+                sales += Sale(t.id, consumed, fullyMatched && matchedQty == t.qty.toLong())
             }
         }
     }
-    // 已全部卖出的买入批次 → 置灰
-    lots.forEach { if (it.remaining == 0) cleared += it.buyTradeId }
+    val cleared = lots.filter { it.remaining == 0 }.mapTo(mutableSetOf()) { it.buyTradeId }
+    sales.filter { it.fullyMatched && it.consumed.isNotEmpty() && it.consumed.all { lot -> lot.remaining == 0 } }
+        .forEach { cleared += it.tradeId }
     return cleared
 }

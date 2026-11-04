@@ -129,6 +129,7 @@ import com.example.stocktracker.StockState
 import com.example.stocktracker.StockViewModel
 import com.example.stocktracker.ThemePreference
 import com.example.stocktracker.TradeType
+import com.example.stocktracker.TradePlanOrder
 import com.example.stocktracker.TrendOutcome
 import com.example.stocktracker.UpdateChecker
 import com.example.stocktracker.WeeklyTrendResult
@@ -198,6 +199,9 @@ fun StockApp() {
     var showClearDialog by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
     var showTradeDialog by remember { mutableStateOf(false) }
+    var showPlanSettings by remember(acc?.stock?.marketCode) { mutableStateOf(false) }
+    var planTrade by remember(acc?.stock?.marketCode) { mutableStateOf<TradePlanOrder?>(null) }
+    var planMatch by remember { mutableStateOf(SellMatch.LOWEST) }
     var showPriceDialog by remember { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<Pair<Int, String>?>(null) }
     var showFeeSettings by remember { mutableStateOf(false) }
@@ -326,6 +330,12 @@ fun StockApp() {
                         acc?.let { weekVm.refresh(it.stock, force = true) }
                     },
                     onTrade = { showTradeDialog = true },
+                    feeConfig = vm.feeConfig,
+                    onPlanSettings = { showPlanSettings = true },
+                    onPlanTrade = { order ->
+                        planMatch = order.match ?: SellMatch.LOWEST
+                        planTrade = order
+                    },
                     onUndo = vm::undoLastTrade,
                     onClear = { showClearDialog = true }
                 )
@@ -342,6 +352,24 @@ fun StockApp() {
             onSell = vm::sell,
             onDismiss = { showTradeDialog = false }
         )
+    }
+    if (showPlanSettings && acc != null) {
+        TradePlanSettingsDialog(acc, vm.feeConfig,
+            onSave = { config ->
+                if (vm.configureTradePlan(config)) showPlanSettings = false
+            }, onDismiss = { showPlanSettings = false })
+    }
+    planTrade?.let { order ->
+        if (acc != null) {
+            TradeDialog(acc.totalQty, planMatch, onSellMatch = { planMatch = it },
+                onBuy = { p, q -> vm.buy(p, q); planTrade = null },
+                onSell = { p, q -> vm.sellWithMatch(p, q, planMatch); planTrade = null },
+                onDismiss = { planTrade = null },
+                initialIsBuy = order.type == TradeType.BUY,
+                initialPrice = order.price,
+                initialQty = order.qty,
+                isPlanTrade = true)
+        }
     }
     if (showPriceDialog) {
         PriceDialog(
@@ -1013,11 +1041,15 @@ private fun TradeDialog(
     onSellMatch: (SellMatch) -> Unit,
     onBuy: (Double, Int) -> Unit,
     onSell: (Double, Int) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    initialIsBuy: Boolean = true,
+    initialPrice: Double? = null,
+    initialQty: Int? = null,
+    isPlanTrade: Boolean = false
 ) {
-    var isBuy by remember { mutableStateOf(true) }
-    var price by remember { mutableStateOf("") }
-    var qty by remember { mutableStateOf("") }
+    var isBuy by remember { mutableStateOf(initialIsBuy) }
+    var price by remember { mutableStateOf(initialPrice?.let(::formatPrice) ?: "") }
+    var qty by remember { mutableStateOf(initialQty?.toString() ?: "") }
     val btnColor = if (isBuy) UpColor else DownColor
 
     AlertDialog(
@@ -1025,6 +1057,10 @@ private fun TradeDialog(
         title = { Text("交易") },
         text = {
             Column {
+                if (isPlanTrade) {
+                    Text("填写券商实际成交价和股数，确认后写入交易记录。", fontSize = 12.sp)
+                    Spacer(Modifier.height(8.dp))
+                }
                 SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                     SegmentedButton(
                         selected = isBuy,
@@ -1140,7 +1176,7 @@ private fun LotRow(lp: com.example.stocktracker.LotPnl, currentPrice: Double?) {
     }
 }
 
-// ---------------- 交易记录卡片（默认 3 条，点击"查看全部"原地展开；已清仓的记录置灰） ----------------
+// Trade history expands in place; only fully sold buy lots are dimmed.
 @Composable
 private fun HistoryPreviewCard(trades: List<com.example.stocktracker.TradeRecord>, onUndo: () -> Unit) {
     var expanded by remember { mutableStateOf(false) }
@@ -1199,7 +1235,8 @@ private fun HistoryPreviewCard(trades: List<com.example.stocktracker.TradeRecord
 
 @Composable
 private fun TradeRow(t: com.example.stocktracker.TradeRecord, cleared: Boolean = false) {
-    val dim = MaterialTheme.colorScheme.onSurface.copy(alpha = if (cleared) 0.35f else 1f)
+    val closedBuyLot = cleared && t.type == TradeType.BUY
+    val dim = MaterialTheme.colorScheme.onSurface.copy(alpha = if (closedBuyLot) 0.35f else 1f)
     Row(
         Modifier.fillMaxWidth().padding(vertical = 6.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1210,15 +1247,15 @@ private fun TradeRow(t: com.example.stocktracker.TradeRecord, cleared: Boolean =
                 Box(
                     Modifier
                         .background(
-                            if (t.type == TradeType.BUY) UpColor.copy(alpha = if (cleared) 0.10f else 0.15f)
-                            else DownColor.copy(alpha = if (cleared) 0.10f else 0.15f),
+                            if (t.type == TradeType.BUY) UpColor.copy(alpha = if (closedBuyLot) 0.10f else 0.15f)
+                            else DownColor.copy(alpha = 0.15f),
                             RoundedCornerShape(4.dp)
                         )
                         .padding(horizontal = 6.dp, vertical = 2.dp)
                 ) {
                     Text(
                         if (t.type == TradeType.BUY) "买入" else "卖出",
-                        color = if (cleared) dim else if (t.type == TradeType.BUY) UpColor else DownColor,
+                        color = if (closedBuyLot) dim else if (t.type == TradeType.BUY) UpColor else DownColor,
                         fontSize = 11.sp, fontWeight = FontWeight.Bold
                     )
                 }
@@ -1240,12 +1277,12 @@ private fun TradeRow(t: com.example.stocktracker.TradeRecord, cleared: Boolean =
                 }
                 Text(
                     "${formatTime(t.time)} · 成本 ¥${formatMoney(t.cost)}",
-                    fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (cleared) 0.25f else 0.5f)
+                    fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (closedBuyLot) 0.25f else 0.5f)
                 )
             }
-            if (cleared) {
+            if (closedBuyLot) {
                 Text(
-                    "已清仓",
+                    "该批次已卖完",
                     fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
                 )
             }
@@ -1254,7 +1291,7 @@ private fun TradeRow(t: com.example.stocktracker.TradeRecord, cleared: Boolean =
             Column(horizontalAlignment = Alignment.End) {
                 Text(
                     "${if (t.netProfit >= 0) "+" else ""}${formatMoney(t.netProfit)}",
-                    color = if (cleared) dim else pnlColor(t.netProfit), fontWeight = FontWeight.Bold
+                    color = pnlColor(t.netProfit), fontWeight = FontWeight.Bold
                 )
                 if (t.fee > 0) {
                     Text("手续费 ¥${formatMoney(t.fee)}", fontSize = 10.sp, color = dim.copy(alpha = 0.7f))
@@ -1445,6 +1482,9 @@ private fun HomeScreen(
     onIntraday: () -> Unit,
     onRefreshTrend: () -> Unit,
     onTrade: () -> Unit,
+    feeConfig: FeeConfig,
+    onPlanSettings: () -> Unit,
+    onPlanTrade: (TradePlanOrder) -> Unit,
     onUndo: () -> Unit,
     onClear: () -> Unit
 ) {
@@ -1498,6 +1538,7 @@ private fun HomeScreen(
                         onIntraday = onIntraday
                     )
                 }
+                item { TradePlanCard(acc, feeConfig, onPlanSettings, onPlanTrade) }
                 item {
                     if (acc != null) {
                         WeeklyTrendCard(weekUi = weekUi, onRefresh = onRefreshTrend)
