@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -32,6 +33,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -86,6 +89,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -188,6 +194,7 @@ fun StockApp() {
     }
     val signatureFingerprint = remember { signatureFingerprintOf(context) }
     val state by vm.state.collectAsStateWithLifecycle()
+    val overviewTab by vm.overviewTab.collectAsStateWithLifecycle()
     val acc = state.selected
     val weekVm: WeeklyTrendViewModel = viewModel { WeeklyTrendViewModel() }
     val weekUi by weekVm.ui.collectAsStateWithLifecycle()
@@ -294,6 +301,8 @@ fun StockApp() {
                     padding = padding,
                     accounts = state.accounts,
                     feeConfig = vm.feeConfig,
+                    selectedTab = overviewTab,
+                    onSelectTab = vm::selectOverviewTab,
                     weekUi = weekUi,
                     onRefreshTrends = { weekVm.refreshAll(state.accounts) },
                     onRefreshData = { vm.refreshAll() },
@@ -1680,12 +1689,14 @@ private fun MineSubPage(
 /** 已实现统计粒度：月 / 日 / 年 */
 private enum class RealizedGranularity { MONTH, DAY, YEAR }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun OverviewScreen(
     padding: PaddingValues,
     accounts: List<StockAccount>,
     feeConfig: FeeConfig,
+    selectedTab: OverviewTab?,
+    onSelectTab: (OverviewTab?) -> Unit,
     weekUi: WeeklyTrendViewModel.UiState,
     onRefreshTrends: () -> Unit,
     onRefreshData: () -> Unit,
@@ -1702,7 +1713,7 @@ private fun OverviewScreen(
         OverviewTab.SHARES
     )
     val tabLabels = tabEntries.map { it?.label ?: "周趋势" }
-    var selected by remember { mutableStateOf(0) }
+    val selected = tabEntries.indexOf(selectedTab).coerceAtLeast(0)
     val isPredict = tabEntries.getOrNull(selected) == null
     val dataTab = if (!isPredict) tabEntries[selected] else null
     val scope = rememberCoroutineScope()
@@ -1750,6 +1761,11 @@ private fun OverviewScreen(
     ) {
         // 可横向滚动的标签行：标签再多也不会挤爆一排，箭头随位置变化提示可滑方向
         val tabScroll = rememberScrollState()
+        val selectedTabRequester = remember { BringIntoViewRequester() }
+        var selectedTabPlaced by remember(selected) { mutableStateOf(false) }
+        LaunchedEffect(selected, selectedTabPlaced) {
+            if (selectedTabPlaced) selectedTabRequester.bringIntoView()
+        }
         val canScrollBack = tabScroll.value > 0          // 可向左（已滑离最左）
         val canScrollFwd = tabScroll.maxValue > tabScroll.value  // 可向右（还没到最右）
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -1762,8 +1778,10 @@ private fun OverviewScreen(
                         val tabSelected = selected == i
                         Box(
                             Modifier
+                                .then(if (tabSelected) Modifier.bringIntoViewRequester(selectedTabRequester) else Modifier)
+                                .onGloballyPositioned { if (tabSelected) selectedTabPlaced = true }
                                 .clickable {
-                                    selected = i
+                                    onSelectTab(tabEntries[i])
                                     if (tabEntries.getOrNull(i) == null) onRefreshTrends()
                                 }
                                 .padding(horizontal = 14.dp, vertical = 12.dp)
@@ -1861,7 +1879,7 @@ private fun OverviewScreen(
         } else if (dataTab == OverviewTab.TRIGGERED) {
             TriggeredPlansPanel(triggered, onOpenStock, Modifier.weight(1f))
         } else if (dataTab == OverviewTab.TRADES) {
-            if (accounts.isEmpty()) EmptyText("暂无股票数据") else TradesSummaryList(accounts, Modifier.weight(1f))
+            if (accounts.isEmpty()) EmptyText("暂无股票数据") else TradesSummaryList(accounts, onOpenStock, Modifier.weight(1f))
         } else if (accounts.isEmpty()) {
             EmptyText("暂无股票数据")
         } else {
@@ -1929,14 +1947,17 @@ private fun OverviewScreen(
 
 /** 交易汇总：全部股票交易记录合并，按时间倒序（最新在上），每行显示股票名 + 交易详情 */
 @Composable
-private fun TradesSummaryList(accounts: List<StockAccount>, modifier: Modifier = Modifier) {
+private fun TradesSummaryList(accounts: List<StockAccount>, onOpenStock: (Int) -> Unit, modifier: Modifier = Modifier) {
     val all = remember(accounts) { allTradesSorted(accounts) }
     if (all.isEmpty()) {
         EmptyText("暂无交易记录")
     } else {
         LazyColumn(modifier) {
             items(all) { (stock, t) ->
-                TradesSummaryRow(stock, t)
+                TradesSummaryRow(stock, t) {
+                    val index = accounts.indexOfFirst { it.stock.marketCode == stock.marketCode }
+                    if (index >= 0) onOpenStock(index)
+                }
                 HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
             }
         }
@@ -1944,8 +1965,9 @@ private fun TradesSummaryList(accounts: List<StockAccount>, modifier: Modifier =
 }
 
 @Composable
-private fun TradesSummaryRow(stock: Stock, t: com.example.stocktracker.TradeRecord) {
-    Column(Modifier.fillMaxWidth()) {
+private fun TradesSummaryRow(stock: Stock, t: com.example.stocktracker.TradeRecord, onOpenStock: () -> Unit) {
+    Column(Modifier.fillMaxWidth().clickable(onClick = onOpenStock)
+        .semantics { contentDescription = "查看${stock.name}股票首页" }) {
         Row(
             Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically

@@ -22,6 +22,14 @@ class StockViewModel(
     private val _state = MutableStateFlow(StockState())
     val state: StateFlow<StockState> = _state.asStateFlow()
 
+    // Session-only navigation state; intentionally excluded from Storage and saved instance state.
+    private val _overviewTab = MutableStateFlow<OverviewTab?>(OverviewTab.FLOAT)
+    val overviewTab: StateFlow<OverviewTab?> = _overviewTab.asStateFlow()
+
+    fun selectOverviewTab(tab: OverviewTab?) {
+        _overviewTab.value = tab
+    }
+
     /** 当前费率配置（内存态；feeStore 非空时持久化） */
     var feeConfig: FeeConfig = initialFeeConfig ?: feeStore?.load() ?: FeeConfig()
         private set
