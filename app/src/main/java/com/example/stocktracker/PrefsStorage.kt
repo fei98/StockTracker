@@ -91,12 +91,12 @@ internal fun buildState(s: StockState): String {
                 .put("holdings", lots)
                 .put("trades", trades)
                 .put("tradePlan", acc.tradePlan?.let { plan ->
-                    JSONObject()
-                        .put("thresholdMode", plan.thresholdMode.name)
-                        .put("threshold", plan.threshold)
-                        .put("unitQty", plan.unitQty)
-                        .put("stepMode", plan.stepMode.name)
-                        .put("step", plan.step)
+                    plan.legacyJson?.let(::JSONObject) ?: JSONObject()
+                        .put("version", 2)
+                        .put("lowerCost", plan.lowerCost)
+                        .put("upperCost", plan.upperCost)
+                        .put("orderAmount", plan.orderAmount)
+                        .put("stepPercent", plan.stepPercent)
                         .put("referencePrice", plan.referencePrice)
                         .put("startAfterTradeId", plan.startAfterTradeId)
                 } ?: JSONObject.NULL)
@@ -147,13 +147,15 @@ internal fun parseState(raw: String): StockState {
                 prevClose = if (a.isNull("prevClose")) null else a.getDouble("prevClose"),
                 totalBuyFee = a.optDouble("totalBuyFee", 0.0),
                 tradePlan = a.optJSONObject("tradePlan")?.let { plan ->
-                    runCatching {
+                    if (plan.optInt("version", 1) != 2) {
+                        // Preserve unsupported settings until the user configures the new model.
+                        TradePlanConfig(referencePrice = plan.optDouble("referencePrice", 0.0),
+                            legacyJson = plan.toString())
+                    } else runCatching {
                         TradePlanConfig(
-                            PlanThresholdMode.valueOf(plan.getString("thresholdMode")),
-                            plan.getDouble("threshold"), plan.getInt("unitQty"),
-                            PlanStepMode.valueOf(plan.getString("stepMode")),
-                            plan.getDouble("step"), plan.getDouble("referencePrice"),
-                            plan.optLong("startAfterTradeId", 0L)
+                            lowerCost = plan.getDouble("lowerCost"), upperCost = plan.getDouble("upperCost"),
+                            orderAmount = plan.getDouble("orderAmount"), stepPercent = plan.getDouble("stepPercent"),
+                            referencePrice = plan.getDouble("referencePrice"), startAfterTradeId = plan.optLong("startAfterTradeId", 0L)
                         )
                     }.getOrNull()?.takeIf { it.isValid }
                 }

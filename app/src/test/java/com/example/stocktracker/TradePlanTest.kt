@@ -1,246 +1,258 @@
 package com.example.stocktracker
 
-import java.time.LocalDateTime
-import java.time.ZoneId
 import org.junit.Assert.*
 import org.junit.Test
 
 class TradePlanTest {
-    private val now = LocalDateTime.of(2026, 11, 4, 12, 0)
-        .atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
-    private val yesterday = now - 86_400_000L
-    private val zeroFees = FeeConfig(0.0, 0.0, 0.0, 0.0)
-    private val config = TradePlanConfig(threshold = 400.0, step = 5.0,
-        referencePrice = 50.0, startAfterTradeId = 1)
-
-    private fun account(qty: Int = 500, plan: TradePlanConfig = config) = StockAccount(
-        Stock("002396", "Example", "sz"),
-        holdings = listOf(BuyLot(1, 50.0, qty, qty, yesterday)),
-        trades = listOf(TradeRecord(1, TradeType.BUY, 50.0, qty, time = yesterday, lotId = 1)),
-        tradePlan = plan
-    )
-
-    private fun evaluate(account: StockAccount) = evaluateTradePlan(account, zeroFees)!!
-
-    private fun record(account: StockAccount, order: TradePlanOrder): StockAccount {
-        val id = (account.trades.maxOfOrNull { it.id } ?: 0L) + 1
-        val price = order.price!!
-        return if (order.type == TradeType.BUY) account.copy(
-            holdings = account.holdings + BuyLot(id, price, order.qty, order.qty, now),
-            trades = account.trades + TradeRecord(id, TradeType.BUY, price, order.qty, time = now, lotId = id)
-        ) else {
-            val matched = matchSellLots(account.holdings, order.qty, price, order.match!!)
-            account.copy(holdings = matched.remaining,
-                trades = account.trades + TradeRecord(id, TradeType.SELL, price, order.qty,
-                    profit = matched.profit, time = now, soldLots = matched.soldLots))
+    private val fees = FeeConfig(0.0, 0.0, 0.0, 0.0)
+    private val config = TradePlanConfig(referencePrice = 5.0)
+    private val lots = listOf(6.0, 5.75, 5.5, 5.25, 5.0).mapIndexed { i, p ->
+        BuyLot(i + 1L, p, 1000, 1000)
+    }
+    private fun account(holdings: List<BuyLot> = lots, plan: TradePlanConfig = config,
+                        current: Double? = null) = StockAccount(Stock("000001", "Example", "sz"),
+        holdings = holdings, tradePlan = plan, currentPrice = current)
+    private fun plan(a: StockAccount) = evaluateTradePlan(a, fees)!!
+    private fun record(a: StockAccount, order: TradePlanOrder): StockAccount {
+        assertNull(order.block)
+        val id = maxOf(a.trades.maxOfOrNull { it.id } ?: 0L, a.holdings.maxOfOrNull { it.id } ?: 0L) + 1
+        return if (order.type == TradeType.BUY) a.copy(
+            holdings = a.holdings + BuyLot(id, order.price!!, order.qty, order.qty),
+            trades = a.trades + TradeRecord(id + 1, TradeType.BUY, order.price, order.qty, lotId = id))
+        else {
+            val sale = matchSellLots(a.holdings, order.qty, order.price!!, order.match!!)
+            a.copy(holdings = sale.remaining, trades = a.trades + TradeRecord(id, TradeType.SELL,
+                order.price, order.qty, profit = sale.profit, soldLots = sale.soldLots))
         }
     }
 
-    @Test
-    fun userScenarioSellsAt55Or45ThenBuysAt40AndSellsAt45Or35() {
-        var account = account()
-        var result = evaluate(account)
-        assertEquals(55.0, result.upward.price!!, 0.000001)
-        assertEquals(45.0, result.downward.price!!, 0.000001)
-        assertEquals(TradeType.SELL, result.downward.type)
-        assertEquals(SellMatch.HIGHEST, result.downward.match)
+    @Test fun bothDirectionsUseTheSameFillAnchorWithOutwardCentRounding() {
+        val result = plan(account())
+        assertEquals(5.20, result.upward.triggerPrice!!, 1e-9)
+        assertEquals(4.80, result.downward.triggerPrice!!, 1e-9)
+        assertEquals(27_500.0, result.positionCost, 1e-9)
+        val rounded = plan(account(plan = config.copy(referencePrice = 2.03)))
+        assertEquals(2.12, rounded.upward.triggerPrice!!, 1e-9)
+        assertEquals(1.94, rounded.downward.triggerPrice!!, 1e-9)
+    }
 
-        account = record(account, result.downward)
-        assertEquals(400, account.totalQty)
-        result = evaluate(account)
-        assertFalse(result.overThreshold)
-        assertEquals(55.0, result.upward.price!!, 0.000001)
-        assertEquals(40.0, result.downward.price!!, 0.000001)
-        assertEquals(TradeType.BUY, result.downward.type)
-
-        account = record(account, result.downward)
-        assertEquals(500, account.totalQty)
-        result = evaluate(account)
-        assertTrue(result.overThreshold)
-        assertEquals(45.0, result.upward.price!!, 0.000001)
+    @Test fun upwardSellsProfitableLowestLotsAndDownwardBuysWithinBudget() {
+        val result = plan(account())
+        assertEquals(TradeType.SELL, result.upward.type)
         assertEquals(SellMatch.LOWEST, result.upward.match)
-        assertEquals(35.0, result.downward.price!!, 0.000001)
-        assertEquals(TradeType.SELL, result.downward.type)
-        assertEquals(SellMatch.HIGHEST, result.downward.match)
+        assertEquals(800, result.upward.qty)
+        assertEquals(23_500.0, result.upward.resultingCost!!, 1e-9)
+        assertEquals(TradeType.BUY, result.downward.type)
+        assertEquals(800, result.downward.qty)
+        assertEquals(31_340.0, result.downward.resultingCost!!, 1e-9)
     }
 
-    @Test
-    fun belowThresholdBuysOneLotAtEveryStepIncludingEquality() {
-        var account = account(qty = 100)
-        for (price in listOf(45.0, 40.0, 35.0, 30.0)) {
-            val order = evaluate(account).downward
-            assertEquals(TradeType.BUY, order.type)
-            assertEquals(100, order.qty)
-            assertEquals(price, order.price!!, 0.000001)
-            account = record(account, order)
-        }
-        assertEquals(500, account.totalQty)
-        val order = evaluate(account).downward
+    @Test fun downwardAtTheUpperLimitSellsTheHighestBatchAtALoss() {
+        val order = plan(account(listOf(BuyLot(1, 5.0, 10000, 10000)))).downward
         assertEquals(TradeType.SELL, order.type)
-        assertEquals(25.0, order.price!!, 0.000001)
+        assertEquals(SellMatch.HIGHEST, order.match)
+        assertEquals(PlanReason.DOWN_REDUCE, order.reason)
+        assertEquals(46_000.0, order.resultingCost!!, 1e-9)
+        assertTrue(order.estimatedNetProfit!! < 0)
     }
 
-    @Test
-    fun reboundSaleRemovesTheLowestLotAndRecomputesBothPoints() {
-        var account = account()
-        account = record(account, evaluate(account).downward)
-        account = record(account, evaluate(account).downward)
-        account = record(account, evaluate(account).upward)
-
-        val result = evaluate(account)
-        assertEquals(400, account.totalQty)
-        assertEquals(50.0, result.lowestBuyPrice!!, 0.000001)
-        assertEquals(55.0, result.upward.price!!, 0.000001)
-        assertEquals(40.0, result.downward.price!!, 0.000001)
+    @Test fun upwardAtTheLowerLimitBuysInsteadOfSellingTheBase() {
+        val order = plan(account(listOf(BuyLot(1, 5.0, 3000, 3000)))).upward
+        assertEquals(TradeType.BUY, order.type)
+        assertEquals(PlanReason.UP_REPLENISH, order.reason)
+        assertEquals(19_160.0, order.resultingCost!!, 1e-9)
     }
 
-    @Test
-    fun costThresholdUsesPurchaseCostAndStillBuysAtEquality() {
-        var account = account(plan = config.copy(thresholdMode = PlanThresholdMode.COST, threshold = 20_000.0))
-        assertTrue(evaluate(account).overThreshold)
-        account = record(account, evaluate(account).downward)
-        account = account.copy(currentPrice = 1.0)
-        assertEquals(20_000.0, account.totalCost, 0.000001)
-        assertEquals(TradeType.BUY, evaluate(account).downward.type)
-        account = record(account, evaluate(account).downward)
-        assertEquals(24_000.0, account.totalCost, 0.000001)
-        assertEquals(TradeType.SELL, evaluate(account).downward.type)
+    @Test fun upwardWithoutAProfitableBatchBuysWhenThereIsRoom() {
+        val order = plan(account(listOf(BuyLot(1, 6.0, 5000, 5000)))).upward
+        assertEquals(TradeType.BUY, order.type)
+        assertEquals(800, order.qty)
+        assertEquals(34_160.0, order.resultingCost!!, 1e-9)
     }
 
-    @Test
-    fun percentageStepsUseTheSeparateBuyLotAndTradeAnchors() {
-        var account = account(plan = config.copy(stepMode = PlanStepMode.PERCENT, step = 10.0))
-        assertEquals(55.0, evaluate(account).upward.price!!, 0.000001)
-        account = record(account, evaluate(account).downward)
-        assertEquals(55.0, evaluate(account).upward.price!!, 0.000001)
-        assertEquals(40.5, evaluate(account).downward.price!!, 0.000001)
+    @Test fun aFullPositionWithoutProfitWaitsUntilTheQuoteMakesLotsProfitable() {
+        val a = account(listOf(BuyLot(1, 8.0, 5000, 5000)), config.copy(upperCost = 40000.0), 6.0)
+        assertEquals(PlanBlock.WAIT, plan(a).upward.block)
+        val order = plan(a.copy(currentPrice = 8.01)).upward
+        assertNull(order.block)
+        assertEquals(5.2, order.triggerPrice!!, 1e-9)
+        assertEquals(8.01, order.price!!, 1e-9)
+        assertEquals(TradeType.SELL, order.type)
+        assertEquals(500, order.qty)
     }
 
-    @Test
-    fun quoteChangesAndGapsNeverAdvanceTheReferenceOrAssumeTrades() {
-        val account = account()
-        val changed = account.copy(currentPrice = 20.0)
-        val result = evaluate(changed)
-        assertEquals(50.0, result.referencePrice, 0.000001)
-        assertEquals(45.0, result.downward.price!!, 0.000001)
-        assertEquals(100, result.downward.qty)
-        assertTrue(result.downward.reached)
-        assertEquals(account.trades, changed.trades)
-        assertEquals(account.holdings, changed.holdings)
-    }
-
-    @Test
-    fun configuredReferenceOverridesOlderTradePrices() {
-        val account = account().copy(tradePlan = config.copy(referencePrice = 42.0))
-        assertEquals(37.0, evaluate(account).downward.price!!, 0.000001)
-        assertEquals(55.0, evaluate(account).upward.price!!, 0.000001)
-    }
-
-    @Test
-    fun undoingATradeReturnsToThePreviousReference() {
-        val original = account()
-        val sold = record(original, evaluate(original).downward)
-        assertEquals(45.0, evaluate(sold).referencePrice, 0.000001)
-        val undone = sold.copy(holdings = original.holdings, trades = sold.trades.dropLast(1))
-        assertEquals(50.0, evaluate(undone).referencePrice, 0.000001)
-    }
-
-    @Test
-    fun sameDayASharesCanBeRecordedWhileBrokerAvailabilityRemainsZero() {
-        val original = account()
-        val frozen = original.copy(holdings = original.holdings.map { it.copy(time = now) },
-            trades = original.trades.map { it.copy(time = now) })
-        assertEquals(0, brokerSellableQty(frozen.holdings, frozen.trades, now))
-        assertNull(evaluate(frozen).upward.block)
-        assertNull(evaluate(frozen).downward.block)
-        assertNull(evaluate(frozen.copy(tradePlan = config.copy(threshold = 500.0))).downward.block)
-    }
-
-    @Test
-    fun sameDayTestPositionCanRecordTheReachedPercentageSellPoint() {
-        val prices = listOf(13.0, 12.0, 11.0)
-        val account = StockAccount(
-            Stock("601857", "Example", "sh"),
-            holdings = prices.mapIndexed { index, price ->
-                BuyLot(index + 1L, price, 100, 100, now)
-            },
-            trades = prices.mapIndexed { index, price ->
-                TradeRecord(index + 1L, TradeType.BUY, price, 100, time = now, lotId = index + 1L)
-            },
-            currentPrice = 13.92,
-            tradePlan = config.copy(thresholdMode = PlanThresholdMode.COST, threshold = 3600.0,
-                stepMode = PlanStepMode.PERCENT, step = 2.0, referencePrice = 11.0, startAfterTradeId = 3L)
-        )
-        val result = evaluate(account)
-        assertEquals(0, brokerSellableQty(account.holdings, account.trades, now))
-        assertEquals(11.22, result.upward.price!!, 0.000001)
-        assertEquals(100, result.upward.qty)
-        assertTrue(result.upward.reached)
-        assertNull(result.upward.block)
-        assertEquals(TradeType.BUY, result.downward.type)
-    }
-
-    @Test
-    fun t0MarketsDoNotFreezeSameDayHoldings() {
-        val account = account().copy(stock = Stock("TEST", "Example", "us"),
-            holdings = listOf(BuyLot(1, 50.0, 500, 500, now)), trades = emptyList())
-        assertNull(evaluate(account).upward.block)
-        assertNull(evaluate(account).downward.block)
-    }
-
-    @Test
-    fun anEmptyPositionOnlyHasABuyPoint() {
-        val empty = account().copy(holdings = emptyList(), trades = emptyList())
-        val result = evaluate(empty)
-        assertEquals(PlanBlock.NO_HOLDINGS, result.upward.block)
-        assertEquals(TradeType.BUY, result.downward.type)
-        assertEquals(100, result.downward.qty)
-        assertNull(result.downward.block)
-    }
-
-    @Test
-    fun lastPartialLotCanBeSoldWithoutCreatingANegativePosition() {
-        val account = account(qty = 50, plan = config.copy(threshold = 0.0))
-        val order = evaluate(account).downward
-        assertEquals(50, order.qty)
-        assertEquals(0, order.resultingQty)
-        assertEquals(0.0, order.resultingCost!!, 0.000001)
-    }
-
-    @Test
-    fun estimatesIncludeSellFeesAndAllocatedBuyFees() {
-        val base = account()
-        val account = base.copy(holdings = base.holdings.map { it.copy(fee = 10.0) })
-        val fees = FeeConfig()
-        val order = evaluateTradePlan(account, fees)!!.upward
-        assertEquals(500.0 - 2.0 - fees.sellFee(5500.0), order.estimatedNetProfit!!, 0.000001)
-        assertEquals(20_000.0, order.resultingCost!!, 0.000001)
-    }
-
-    @Test
-    fun invalidOrMissingConfigurationsDisableOnlyThePlan() {
-        assertNull(evaluateTradePlan(account().copy(tradePlan = null), zeroFees))
-        for (invalid in listOf(config.copy(step = 0.0), config.copy(threshold = Double.NaN),
-            config.copy(unitQty = 0), config.copy(stepMode = PlanStepMode.PERCENT, step = 100.0),
-            config.copy(threshold = 1.5), config.copy(referencePrice = Double.POSITIVE_INFINITY))) {
-            assertNull(evaluateTradePlan(account(plan = invalid), zeroFees))
+    @Test fun narrowCostBoundsCanMakeBothDirectionsWaitWithoutInventingATrade() {
+        val p = config.copy(lowerCost = 25000.0, upperCost = 25010.0)
+        val result = plan(account(listOf(BuyLot(1, 5.0, 5000, 5000)), p))
+        for (order in listOf(result.upward, result.downward)) {
+            assertEquals(PlanBlock.WAIT, order.block)
+            assertNull(order.type)
+            assertEquals(0, order.qty)
         }
     }
 
-    @Test
-    fun nonPositiveOrSubTickPricesCannotTriggerOrders() {
-        assertEquals(PlanBlock.INVALID_PRICE, evaluate(account(plan = config.copy(step = 60.0))).downward.block)
-        val subTick = evaluate(account(plan = config.copy(step = 0.0001)))
-        assertEquals(PlanBlock.INVALID_PRICE, subTick.upward.block)
-        assertEquals(PlanBlock.INVALID_PRICE, subTick.downward.block)
+    @Test fun amountSizingUsesTheCrossedQuoteAndRoundsToTheNearestHundred() {
+        val order = plan(account(current = 2.0)).downward
+        assertEquals(4.8, order.triggerPrice!!, 1e-9)
+        assertEquals(2.0, order.price!!, 1e-9)
+        assertEquals(2000, order.qty)
+        assertTrue(order.reached)
     }
 
-    @Test
-    fun equalityTriggersBothDirectionsAndMissingQuotesTriggerNeither() {
-        val base = account()
-        assertFalse(evaluate(base).upward.reached)
-        assertFalse(evaluate(base).downward.reached)
-        assertTrue(evaluate(base.copy(currentPrice = 55.0)).upward.reached)
-        assertTrue(evaluate(base.copy(currentPrice = 45.0)).downward.reached)
+    @Test fun aSmallAmountStillRequestsOneRoundLotWhenTheCostBoundsPermitIt() {
+        assertEquals(100, plan(account(plan = config.copy(orderAmount = 1.0))).downward.qty)
+    }
+
+    @Test fun aBuyIsClippedToTheCostCeilingAndTheNextDropReverses() {
+        var a = account(plan = config.copy(upperCost = 28000.0))
+        val first = plan(a).downward
+        assertEquals(TradeType.BUY, first.type)
+        assertEquals(100, first.qty)
+        assertEquals(27_980.0, first.resultingCost!!, 1e-9)
+        a = record(a, first)
+        val next = plan(a).downward
+        assertEquals(TradeType.SELL, next.type)
+        assertEquals(SellMatch.HIGHEST, next.match)
+    }
+
+    @Test fun lessThanOneHundredSharesOfCostHeadroomCountsAsFull() {
+        val order = plan(account(plan = config.copy(upperCost = 27900.0))).downward
+        assertEquals(TradeType.SELL, order.type)
+        assertEquals(800, order.qty)
+        assertEquals(22_700.0, order.resultingCost!!, 1e-9)
+    }
+
+    @Test fun salesAreClippedUsingMatchedPurchaseCostRatherThanSaleProceeds() {
+        val p = config.copy(lowerCost = 26000.0, upperCost = 27500.0)
+        val result = plan(account(plan = p))
+        assertEquals(300, result.upward.qty)
+        assertEquals(26_000.0, result.upward.resultingCost!!, 1e-9)
+        assertEquals(200, result.downward.qty)
+        assertEquals(26_300.0, result.downward.resultingCost!!, 1e-9)
+    }
+
+    @Test fun anUpwardSaleNeverIncludesAnUnprofitableBatchToFillTheAmount() {
+        val order = plan(account(listOf(BuyLot(1, 4.0, 100, 100), BuyLot(2, 6.0, 5000, 5000)))).upward
+        assertEquals(TradeType.SELL, order.type)
+        assertEquals(100, order.qty)
+    }
+
+    @Test fun oddLegacyLotsAreConsumedInActualMatchOrderBeforeRoundingTheTotal() {
+        val holdings = listOf(BuyLot(1, 4.0, 50, 50), BuyLot(2, 5.0, 150, 150))
+        val order = plan(account(holdings, config.copy(lowerCost = 0.0))).upward
+        assertEquals(200, order.qty)
+        assertEquals(0.0, order.resultingCost!!, 1e-9)
+        val insufficientProfit = plan(account(listOf(BuyLot(1, 4.0, 50, 50), BuyLot(2, 6.0, 150, 150)),
+            config.copy(lowerCost = 0.0))).upward
+        assertEquals(TradeType.BUY, insufficientProfit.type)
+    }
+
+    @Test fun quotesDoNotMoveTheAnchorAndUndoRestoresThePriorFill() {
+        val a = account(plan = config.copy(startAfterTradeId = 10)).copy(trades = listOf(
+            TradeRecord(9, TradeType.BUY, 100.0, 100), TradeRecord(11, TradeType.SELL, 6.0, 100)))
+        val changedQuote = a.copy(currentPrice = 9.0)
+        assertEquals(6.0, plan(changedQuote).referencePrice, 1e-9)
+        assertEquals(6.24, plan(changedQuote).upward.triggerPrice!!, 1e-9)
+        assertEquals(5.0, plan(a.copy(trades = a.trades.dropLast(1))).referencePrice, 1e-9)
+    }
+
+    @Test fun actualRecordedPricesBecomeTheNextReference() {
+        val a = account().copy(trades = listOf(TradeRecord(11, TradeType.BUY, 4.7, 800)))
+        val result = plan(a)
+        assertEquals(4.7, result.referencePrice, 1e-9)
+        assertEquals(4.89, result.upward.triggerPrice!!, 1e-9)
+        assertEquals(4.51, result.downward.triggerPrice!!, 1e-9)
+    }
+
+    @Test fun sameDayBrokerFreezesDoNotRestrictBookkeepingSuggestions() {
+        val now = 1_793_750_400_000L
+        val a = account(listOf(BuyLot(1, 5.0, 5000, 5000, now))).copy(
+            trades = listOf(TradeRecord(1, TradeType.BUY, 5.0, 5000, time = now, lotId = 1)))
+        assertEquals(0, brokerSellableQty(a.holdings, a.trades, now))
+        assertEquals(TradeType.SELL, plan(a).upward.type)
+        assertNull(plan(a).upward.block)
+    }
+
+    @Test fun estimatesIncludeBothTheSaleFeeAndAllocatedHistoricalBuyFee() {
+        val a = account(listOf(BuyLot(1, 5.0, 5000, 5000, fee = 50.0)))
+        val order = evaluateTradePlan(a, FeeConfig())!!.upward
+        val sellFee = FeeConfig().sellFee(5.2 * 800)
+        assertEquals(sellFee, order.estimatedFee!!, 1e-9)
+        assertEquals(160.0 - 8.0 - sellFee, order.estimatedNetProfit!!, 1e-8)
+    }
+
+    @Test fun decimalCapacityDoesNotCrossTheCeilingBecauseOfFloatingPointNoise() {
+        val a = account(listOf(BuyLot(1, 0.1, 10, 10)),
+            config.copy(lowerCost = 0.0, upperCost = 21.0, orderAmount = 10.0, referencePrice = 0.21))
+        val order = plan(a).downward
+        assertEquals(100, order.qty)
+        assertEquals(21.0, order.resultingCost!!, 1e-9)
+    }
+
+    @Test fun existingPositionsOutsideTheLimitsCanMoveTowardsTheBand() {
+        val over = plan(account(listOf(BuyLot(1, 10.0, 10000, 10000)))).downward
+        assertEquals(TradeType.SELL, over.type)
+        assertEquals(92_000.0, over.resultingCost!!, 1e-9)
+        val under = plan(account(listOf(BuyLot(1, 5.0, 200, 200)))).upward
+        assertEquals(TradeType.BUY, under.type)
+    }
+
+    @Test fun quantityOverflowCannotProduceANegativeBuy() {
+        val a = account(listOf(BuyLot(1, 1.0, Int.MAX_VALUE, Int.MAX_VALUE)),
+            config.copy(lowerCost = 0.0, upperCost = 1e20, orderAmount = 1e20, referencePrice = 1.0))
+        assertEquals(PlanBlock.WAIT, plan(a).downward.block)
+    }
+
+    @Test fun invalidHoldingsAndUnsupportedSettingsCannotGenerateOrders() {
+        val invalid = account(listOf(BuyLot(1, Double.NaN, 100, 100)))
+        assertEquals(PlanBlock.INVALID_HOLDINGS, plan(invalid).upward.block)
+        assertNull(evaluateTradePlan(account(plan = config.copy(legacyJson = "{}")), fees))
+        for (bad in listOf(config.copy(lowerCost = -1.0), config.copy(upperCost = 15000.0),
+            config.copy(orderAmount = 0.0), config.copy(stepPercent = 100.0),
+            config.copy(stepPercent = Double.NaN), config.copy(referencePrice = 0.0))) {
+            assertNull(evaluateTradePlan(account(plan = bad), fees))
+        }
+    }
+
+    @Test fun overflowingValuesAreBlockedAndClosedInvalidLotsDoNotPolluteEstimates() {
+        val overflow = account(listOf(BuyLot(1, 1e308, 100, 100)))
+        assertEquals(PlanBlock.INVALID_HOLDINGS, plan(overflow).upward.block)
+        assertEquals(PlanBlock.INVALID_PRICE, plan(account(current = 1e308)).upward.block)
+        val closed = account(lots + BuyLot(99, Double.NaN, 100, 0))
+        val order = plan(closed).upward
+        assertNull(order.block)
+        assertTrue(order.estimatedNetProfit!!.isFinite())
+    }
+
+    @Test fun centQuoteReplayMatchesTheIndependentlyCheckedSimulation() {
+        var a = account()
+        var cash = 72_500.0
+        val waypoints = listOf(500, 200, 300, 200, 300, 200)
+        var downQty = 0
+        var downCost = 0.0
+        for (i in 1 until waypoints.size) {
+            val from = waypoints[i - 1]
+            val to = waypoints[i]
+            val sign = if (to > from) 1 else -1
+            var quote = from + sign
+            while (if (sign > 0) quote <= to else quote >= to) {
+                a = a.copy(currentPrice = quote / 100.0)
+                val result = plan(a)
+                val order = listOf(result.upward, result.downward).firstOrNull { it.reached && it.block == null }
+                if (order != null) {
+                    cash += order.price!! * order.qty * if (order.type == TradeType.BUY) -1 else 1
+                    a = record(a, order)
+                }
+                if (i == 1 && quote == 200) { downQty = a.totalQty; downCost = a.totalCost }
+                quote += sign
+            }
+        }
+        assertEquals(15_200, downQty)
+        assertEquals(45_220.0, downCost, 1e-6)
+        assertEquals(18_500, a.totalQty)
+        assertEquals(49_991.0, a.totalCost, 1e-6)
+        assertEquals(30_811.0, cash, 1e-6)
+        assertTrue(a.totalCost in 15000.0..50000.0)
+        assertTrue(cash > 0)
     }
 }

@@ -17,7 +17,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -39,8 +38,7 @@ import androidx.compose.ui.unit.sp
 import com.example.stocktracker.FeeConfig
 import com.example.stocktracker.PlanBlock
 import com.example.stocktracker.PlanDirection
-import com.example.stocktracker.PlanStepMode
-import com.example.stocktracker.PlanThresholdMode
+import com.example.stocktracker.PlanReason
 import com.example.stocktracker.StockAccount
 import com.example.stocktracker.TradePlanConfig
 import com.example.stocktracker.TradePlanOrder
@@ -65,14 +63,15 @@ internal fun TradePlanCard(
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(horizontal = 10.dp, vertical = 4.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("仓位提醒", fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                Text("仓位跟随", fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 TextButton(onClick = { if (result == null) onSettings() else showDetails = true },
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
                     Text(if (result == null) "设置提醒" else "详情", fontSize = 12.sp)
                 }
             }
             if (result == null) {
-                PlanHint("设置每份股数、仓位阈值和步长。")
+                PlanHint(if (account.tradePlan?.needsSetup == true) "旧提醒参数已保留，请重新设置金额上下限。"
+                    else "设置持仓成本上下限、每格金额和百分比步长。")
             } else {
                 CompactPlanOrderRow(result.upward, onTrade)
                 HorizontalDivider()
@@ -91,23 +90,23 @@ internal fun TradePlanCard(
 @Composable
 private fun CompactPlanOrderRow(order: TradePlanOrder, onTrade: (TradePlanOrder) -> Unit) {
     val direction = if (order.direction == PlanDirection.UP) "上涨" else "下跌"
-    val side = if (order.type == TradeType.BUY) "买入" else "卖出"
+    val side = when (order.type) { TradeType.BUY -> "买入"; TradeType.SELL -> "卖出"; null -> "等待" }
     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         Column(Modifier.width(40.dp)) {
             Text(direction, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             val status = when {
-                order.block == PlanBlock.NO_HOLDINGS -> "无持仓"
+                order.block == PlanBlock.WAIT -> "等待"
                 order.block != null -> "需设置"
                 order.reached -> "已到价"
                 else -> null
             }
             status?.let { Text(it, fontSize = 9.sp, color = MaterialTheme.colorScheme.primary) }
         }
-        Text(order.price?.let { "¥${formatPrice(it)}" } ?: "—", fontSize = 16.sp,
+        Text(order.triggerPrice?.let { "¥${formatPrice(it)}" } ?: "—", fontSize = 16.sp,
             fontWeight = FontWeight.Bold, color = if (order.direction == PlanDirection.UP) UpColor else DownColor,
             modifier = Modifier.weight(1f))
-        Text("$side${order.qty}股", fontSize = 12.sp)
+        Text(if (order.type == null) side else "$side${order.qty}股", fontSize = 12.sp)
         TextButton(onClick = { onTrade(order) }, enabled = order.block == null,
             modifier = Modifier.semantics { contentDescription = "记录$direction$side" },
             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
@@ -125,24 +124,24 @@ private fun TradePlanDetailsDialog(
     onDismiss: () -> Unit
 ) {
     val config = account.tradePlan!!
-    val threshold = if (config.thresholdMode == PlanThresholdMode.QUANTITY)
-        "${config.threshold.toInt()} 股" else "¥${formatMoney(config.threshold)}"
-    val step = if (config.stepMode == PlanStepMode.PRICE)
-        "¥${formatPrice(config.step)}" else "${formatPrice(config.step)}%"
     AlertDialog(onDismissRequest = onDismiss,
         title = { Text("提醒详情 · ${account.stock.name}") },
         text = {
             Column(Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                PlanHint("仓位阈值 $threshold · 每份 ${config.unitQty} 股 · 步长 $step")
-                PlanHint("${if (result.overThreshold) "已超过阈值，下跌减仓" else "未超过阈值，下跌买入一份"} · 下行参考 ¥${formatPrice(result.referencePrice)}")
+                PlanHint("买入成本下限 ¥${formatMoney(config.lowerCost)} · 上限 ¥${formatMoney(config.upperCost)}")
+                PlanHint("每格约 ¥${formatMoney(config.orderAmount)} · 步长 ${formatPrice(config.stepPercent)}%")
+                PlanHint("当前剩余买入成本 ¥${formatMoney(result.positionCost)} · 成交参考 ¥${formatPrice(result.referencePrice)}")
                 PlanHint("该股累计已实现净盈亏 ${if (account.realizedPnlFee >= 0) "+" else ""}${formatMoney(account.realizedPnlFee)} 元")
                 PlanOrderRow(result.upward, onTrade)
                 HorizontalDivider()
                 PlanOrderRow(result.downward, onTrade)
                 val price = account.currentPrice?.let { "¥${formatPrice(it)}" } ?: "未设置"
                 PlanHint("按显示现价 $price 判断；刷新行情或设置现价后更新。")
-                PlanHint("仅提示并记录实际成交；成交记账后才更新下一格。持仓成本不含已实现亏损。")
+                PlanHint("两侧均以最近记账成交价起算；行情刷新和等待不移动参考价。")
+                PlanHint("触发价按0.01元向外取整；已越过触发位时，按显示现价重算数量和买卖方向。")
+                PlanHint("股数按100股取整并受成本边界裁剪；上涨只卖买价低于操作价的批次，费用另扣。")
+                PlanHint("仅提示并记录实际成交；请在券商核对可用资金。买入成本不含手续费和已实现亏损。")
             }
         },
         confirmButton = { TextButton(onClick = onSettings) { Text("调整设置") } },
@@ -151,25 +150,37 @@ private fun TradePlanDetailsDialog(
 
 @Composable
 private fun PlanOrderRow(order: TradePlanOrder, onTrade: (TradePlanOrder) -> Unit) {
-    val side = if (order.type == TradeType.BUY) "买入" else "卖出"
+    val side = when (order.type) { TradeType.BUY -> "买入"; TradeType.SELL -> "卖出"; null -> "等待" }
     val direction = if (order.direction == PlanDirection.UP) "上涨" else "下跌"
-    val price = order.price?.let { "¥${formatPrice(it)}" } ?: "—"
+    val price = order.triggerPrice?.let { "¥${formatPrice(it)}" } ?: "—"
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("$direction 至 $price · $side ${order.qty} 股", fontSize = 13.sp,
+            Text("$direction 至 $price · ${if (order.type == null) side else "$side ${order.qty} 股"}", fontSize = 13.sp,
                 fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
             TextButton(onClick = { onTrade(order) }, enabled = order.block == null) { Text("记录$side") }
         }
         val status = when (order.block) {
-            PlanBlock.NO_HOLDINGS -> "当前无持仓可卖"
+            PlanBlock.WAIT -> "当前仓位边界或整手条件不允许操作，继续等待"
             PlanBlock.INVALID_PRICE -> "当前价格或数量无法形成有效的一格，请调整配置"
+            PlanBlock.INVALID_HOLDINGS -> "Invalid holdings data. Check quantities and prices."
             null -> if (order.reached) "已到达触发价，请核对实际行情" else "等待价格到达"
         }
         Text(status, fontSize = 12.sp,
             color = if (order.reached && order.block == null) MaterialTheme.colorScheme.primary
                 else MaterialTheme.colorScheme.onSurfaceVariant)
-        order.match?.let { PlanHint("记账按${it.label}；操作后 ${order.resultingQty} 股") }
-            ?: PlanHint("买入一份，操作后 ${order.resultingQty} 股")
+        val reason = when (order.reason) {
+            PlanReason.UP_PROFIT -> "有盈利批次，卖出最低买价批次并保留成本底仓。"
+            PlanReason.UP_REPLENISH -> "接近成本底仓或没有可卖盈利批次，改为买入。"
+            PlanReason.DOWN_BUY -> "仍有成本额度，下跌买入。"
+            PlanReason.DOWN_REDUCE -> "成本额度不足再买100股，下跌卖出最高买价批次。"
+            PlanReason.WAIT -> "本格不新增记账操作。"
+        }
+        PlanHint(reason)
+        if (order.type != null) {
+            order.match?.let { PlanHint("记账按${it.label}；操作后 ${order.resultingQty} 股") }
+                ?: PlanHint("操作后 ${order.resultingQty} 股")
+            PlanHint("股数和费用按 ¥${formatPrice(order.price!!)} 估算；已到价时按显示现价预填，请核对实际成交。")
+        }
         order.resultingCost?.let { PlanHint("预计剩余买入成本 ¥${formatMoney(it)} · 本次手续费 ¥${formatMoney(order.estimatedFee ?: 0.0)}") }
         order.estimatedNetProfit?.let {
             PlanHint("本次预计已实现净盈亏 ${if (it >= 0) "+" else ""}${formatMoney(it)} 元")
@@ -211,7 +222,7 @@ internal fun TriggeredPlansPanel(
                             entry.orders.forEach { order ->
                                 val direction = if (order.direction == PlanDirection.UP) "上涨" else "下跌"
                                 val side = if (order.type == TradeType.BUY) "买入" else "卖出"
-                                Text("$direction ¥${formatPrice(order.price!!)} · $side ${order.qty}股",
+                                Text("$direction ¥${formatPrice(order.triggerPrice!!)} · $side ${order.qty}股",
                                     fontSize = 13.sp, fontWeight = FontWeight.Bold,
                                     color = if (order.direction == PlanDirection.UP) UpColor else DownColor)
                             }
@@ -232,59 +243,43 @@ internal fun TradePlanSettingsDialog(
     onDismiss: () -> Unit
 ) {
     val existing = account.tradePlan
-    var thresholdMode by remember { mutableStateOf(existing?.thresholdMode ?: PlanThresholdMode.QUANTITY) }
-    var thresholdText by remember { mutableStateOf(existing?.threshold?.let(::formatPrice) ?: account.totalQty.toString()) }
-    var qtyText by remember { mutableStateOf((existing?.unitQty ?: 100).toString()) }
-    var stepMode by remember { mutableStateOf(existing?.stepMode ?: PlanStepMode.PRICE) }
-    var stepText by remember { mutableStateOf(existing?.step?.let(::formatPrice) ?: "") }
+    val active = existing?.takeUnless { it.needsSetup }
+    var lowerText by remember { mutableStateOf(formatPrice(active?.lowerCost ?: 15_000.0)) }
+    var upperText by remember { mutableStateOf(formatPrice(active?.upperCost ?: 50_000.0)) }
+    var amountText by remember { mutableStateOf(formatPrice(active?.orderAmount ?: 4_000.0)) }
+    var stepText by remember { mutableStateOf(formatPrice(active?.stepPercent ?: 4.0)) }
     val initialReference = evaluateTradePlan(account, feeConfig)?.referencePrice
-        ?: account.holdings.filter { it.remainingQty > 0 }.minOfOrNull { it.price }
-        ?: account.currentPrice ?: account.trades.lastOrNull()?.price
+        ?: account.trades.lastOrNull { it.price.isFinite() && it.price > 0 }?.price
+        ?: account.currentPrice?.takeIf { it.isFinite() && it > 0 }
+        ?: account.holdings.filter { it.remainingQty > 0 && it.price.isFinite() && it.price > 0 }.minOfOrNull { it.price }
     var referenceText by remember { mutableStateOf(initialReference?.let(::formatPrice) ?: "") }
-    val threshold = thresholdText.toDoubleOrNull()
-    val qty = qtyText.toIntOrNull()
+    val lower = lowerText.toDoubleOrNull()
+    val upper = upperText.toDoubleOrNull()
+    val amount = amountText.toDoubleOrNull()
     val step = stepText.toDoubleOrNull()
     val reference = referenceText.toDoubleOrNull()
-    val config = if (threshold != null && qty != null && step != null && reference != null)
-        TradePlanConfig(thresholdMode, threshold, qty, stepMode, step, reference,
-            account.trades.maxOfOrNull { it.id } ?: 0L).takeIf { it.isValid } else null
+    val config = if (lower != null && upper != null && amount != null && step != null && reference != null)
+        TradePlanConfig(lowerCost = lower, upperCost = upper, orderAmount = amount,
+            stepPercent = step, referencePrice = reference,
+            startAfterTradeId = account.trades.maxOfOrNull { it.id } ?: 0L).takeIf { it.isValid } else null
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("买卖提醒 · ${account.stock.name}") },
+        title = { Text("仓位跟随 · ${account.stock.name}") },
         text = {
             Column(Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("仓位阈值", fontWeight = FontWeight.Bold)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(thresholdMode == PlanThresholdMode.QUANTITY, onClick = {
-                        if (thresholdMode != PlanThresholdMode.QUANTITY) {
-                            thresholdMode = PlanThresholdMode.QUANTITY
-                            thresholdText = account.totalQty.toString()
-                        }
-                    }, label = { Text("股数") })
-                    FilterChip(thresholdMode == PlanThresholdMode.COST, onClick = {
-                        if (thresholdMode != PlanThresholdMode.COST) {
-                            thresholdMode = PlanThresholdMode.COST
-                            thresholdText = formatPrice(account.totalCost)
-                        }
-                    }, label = { Text("买入成本") })
-                }
-                PlanNumberField(thresholdText, { thresholdText = it },
-                    if (thresholdMode == PlanThresholdMode.QUANTITY) "仓位阈值（股）" else "剩余持仓买入成本阈值（元）",
-                    decimal = thresholdMode == PlanThresholdMode.COST)
-                PlanHint("超过阈值，下跌一格卖一份；等于或低于阈值，下跌一格买一份，可连续买入。")
-                PlanHint("阈值是买卖方向分界，允许暂时超过一份；买入成本不含手续费，不是现价市值。")
-                PlanNumberField(qtyText, { qtyText = it }, "每份股数", decimal = false)
-                PlanHint("请按该股票在券商允许的交易单位设置每份股数。")
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(stepMode == PlanStepMode.PRICE, { stepMode = PlanStepMode.PRICE }, label = { Text("固定价差") })
-                    FilterChip(stepMode == PlanStepMode.PERCENT, { stepMode = PlanStepMode.PERCENT }, label = { Text("百分比") })
-                }
-                PlanNumberField(stepText, { stepText = it }, if (stepMode == PlanStepMode.PRICE) "步长（元）" else "步长（%，大于0且小于100）")
-                PlanNumberField(referenceText, { referenceText = it }, "下行初始参考价（元）")
-                PlanHint("初始默认最低持仓买价。保存后重新以此价起算；之后只随实际交易记账更新。")
-                PlanHint("上涨卖点＝最低持仓买价＋一步，卖最低价批次；下跌减仓卖最高价批次。")
+                if (existing?.needsSetup == true) PlanHint("旧提醒参数已保留；保存后启用新的金额跟随规则。")
+                PlanNumberField(lowerText, { lowerText = it }, "持仓成本下限（元）")
+                PlanNumberField(upperText, { upperText = it }, "持仓成本上限（元）")
+                PlanHint("按剩余批次的原始买入成本计算，不随现价涨跌变化；不含手续费。")
+                PlanNumberField(amountText, { amountText = it }, "每格交易金额（元）")
+                PlanNumberField(stepText, { stepText = it }, "步长（%）")
+                PlanHint("股数按最接近金额的100股整数倍计算，临近边界时缩量。")
+                PlanNumberField(referenceText, { referenceText = it }, "初始成交参考价（元）")
+                PlanHint("默认最近实际记账成交价；无记录时使用现价。保存后以此价重新起算，之后只随交易记账更新。")
+                PlanHint("上涨优先卖盈利的最低买价批次，否则补仓；下跌有额度就买，额度不足则卖最高买价批次。")
+                if (config == null) PlanHint("Enter finite values: 0 ≤ lower < upper, amount > 0, 0 < step < 100, reference > 0.")
                 if (existing != null) {
                     TextButton(onClick = { onSave(null) }) { Text("关闭此股票的提醒") }
                 }

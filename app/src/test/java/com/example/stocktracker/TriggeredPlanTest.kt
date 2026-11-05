@@ -5,99 +5,73 @@ import org.junit.Test
 
 class TriggeredPlanTest {
     private val fees = FeeConfig(0.0, 0.0, 0.0, 0.0)
-    private val config = TradePlanConfig(threshold = 400.0, step = 5.0, referencePrice = 50.0)
+    private val config = TradePlanConfig(referencePrice = 5.0)
+    private fun account(price: Double? = 5.0) = StockAccount(Stock("000001", "Example", "sz"),
+        holdings = listOf(BuyLot(1, 5.0, 5000, 5000)), currentPrice = price, tradePlan = config)
 
-    private fun account(price: Double? = 50.0, qty: Int = 500) = StockAccount(
-        Stock("000001", "Example", "sz"),
-        holdings = listOf(BuyLot(1, 50.0, qty, qty)),
-        currentPrice = price, tradePlan = config
-    )
-
-    @Test
-    fun anUpwardPointIsIncludedAtEqualityWithLowestPriceMatching() {
-        val entry = triggeredPlanEntries(listOf(account(55.0)), fees).single()
-        assertEquals(55.0, entry.currentPrice, 0.000001)
-        val order = entry.orders.single()
+    @Test fun equalityIncludesTheUpwardPointWithLowestPriceMatching() {
+        val order = triggeredPlanEntries(listOf(account(5.2)), fees).single().orders.single()
         assertEquals(PlanDirection.UP, order.direction)
-        assertEquals(TradeType.SELL, order.type)
         assertEquals(SellMatch.LOWEST, order.match)
-        assertEquals(100, order.qty)
+        assertEquals(800, order.qty)
     }
 
-    @Test
-    fun aDownwardPointAboveTheThresholdUsesHighestPriceMatching() {
-        val order = triggeredPlanEntries(listOf(account(45.0)), fees).single().orders.single()
-        assertEquals(PlanDirection.DOWN, order.direction)
+    @Test fun aFullCostBudgetTriggersHighestPriceReductionOnADrop() {
+        val a = account(4.8).copy(holdings = listOf(BuyLot(1, 5.0, 10000, 10000)))
+        val order = triggeredPlanEntries(listOf(a), fees).single().orders.single()
         assertEquals(TradeType.SELL, order.type)
         assertEquals(SellMatch.HIGHEST, order.match)
     }
 
-    @Test
-    fun aDownwardPointAtTheThresholdStillRecommendsOneBuyLot() {
-        val order = triggeredPlanEntries(listOf(account(45.0, qty = 400)), fees).single().orders.single()
+    @Test fun costHeadroomTriggersAnAmountSizedBuy() {
+        val order = triggeredPlanEntries(listOf(account(4.8)), fees).single().orders.single()
         assertEquals(TradeType.BUY, order.type)
-        assertEquals(100, order.qty)
-        assertEquals(500, order.resultingQty)
+        assertEquals(800, order.qty)
     }
 
-    @Test
-    fun movingBackInsideTheBandRemovesTheStockWithoutKeepingTriggerHistory() {
-        val original = account(60.0)
-        assertEquals(1, triggeredPlanEntries(listOf(original), fees).size)
-        assertTrue(triggeredPlanEntries(listOf(original.copy(currentPrice = 50.0)), fees).isEmpty())
-        assertEquals(500, original.totalQty)
-        assertTrue(original.trades.isEmpty())
+    @Test fun returningInsideTheBandRemovesTheEntryWithoutTrading() {
+        val a = account(5.3)
+        assertEquals(1, triggeredPlanEntries(listOf(a), fees).size)
+        assertTrue(triggeredPlanEntries(listOf(a.copy(currentPrice = 5.0)), fees).isEmpty())
+        assertTrue(a.trades.isEmpty())
+        assertEquals(5000, a.totalQty)
     }
 
-    @Test
-    fun unconfiguredStocksAndInvalidQuotesCannotAppear() {
-        val accounts = listOf(account(60.0).copy(tradePlan = null), account(null), account(0.0),
+    @Test fun missingInvalidOrLegacySettingsAndQuotesCannotTrigger() {
+        val invalid = listOf(account(6.0).copy(tradePlan = null), account(null), account(0.0),
             account(-1.0), account(Double.NaN), account(Double.POSITIVE_INFINITY),
-            account(60.0).copy(tradePlan = config.copy(step = 0.0)))
-        assertTrue(triggeredPlanEntries(accounts, fees).isEmpty())
+            account(6.0).copy(tradePlan = config.copy(stepPercent = 0.0)),
+            account(6.0).copy(tradePlan = config.copy(legacyJson = "{}")))
+        assertTrue(triggeredPlanEntries(invalid, fees).isEmpty())
     }
 
-    @Test
-    fun navigationIndexesAndDistinctMarketCodesSurviveFilteringAndDuplicateNames() {
-        val first = account(60.0)
-        val second = account(40.0).copy(stock = Stock("000002", "Example", "sz"))
-        val entries = triggeredPlanEntries(listOf(account(50.0), first, second), fees)
+    @Test fun indexesAndMarketCodesSurviveFilteringAndDuplicateNames() {
+        val second = account(4.7).copy(stock = Stock("000002", "Example", "sz"))
+        val entries = triggeredPlanEntries(listOf(account(), account(5.3), second), fees)
         assertEquals(listOf(1, 2), entries.map { it.accountIndex })
         assertEquals(listOf("sz000001", "sz000002"), entries.map { it.stock.marketCode })
     }
 
-    @Test
-    fun simultaneousDirectionsAreGroupedIntoOneStockEntry() {
-        val account = account(75.0).copy(tradePlan = config.copy(referencePrice = 100.0))
-        val entry = triggeredPlanEntries(listOf(account), fees).single()
-        assertEquals(listOf(PlanDirection.UP, PlanDirection.DOWN), entry.orders.map { it.direction })
+    @Test fun aSingleFillAnchorCannotTriggerBothDirectionsAtOnce() {
+        for (price in listOf(1.0, 4.8, 5.0, 5.2, 100.0)) {
+            assertTrue(triggeredPlanEntries(listOf(account(price)), fees).all { it.orders.size == 1 })
+        }
     }
 
-    @Test
-    fun blockedSellPointsAreExcludedButAnEmptyConfiguredPositionCanTriggerABuy() {
-        val empty = account(60.0, qty = 0).copy(holdings = emptyList())
-        assertTrue(triggeredPlanEntries(listOf(empty), fees).isEmpty())
-        val order = triggeredPlanEntries(listOf(empty.copy(currentPrice = 40.0)), fees)
-            .single().orders.single()
-        assertEquals(TradeType.BUY, order.type)
+    @Test fun waitingOrdersAreExcludedWhileAnEmptyPositionCanBuy() {
+        val waiting = account(6.0).copy(tradePlan = config.copy(lowerCost = 25000.0, upperCost = 25010.0))
+        assertTrue(triggeredPlanEntries(listOf(waiting), fees).isEmpty())
+        val empty = account(4.8).copy(holdings = emptyList())
+        assertEquals(TradeType.BUY, triggeredPlanEntries(listOf(empty), fees).single().orders.single().type)
     }
 
-    @Test
-    fun sameDayFrozenSharesDoNotHideBookkeepingSignals() {
-        val now = 1_793_750_400_000L
-        val account = account(60.0).copy(
-            holdings = listOf(BuyLot(1, 50.0, 500, 500, now)),
-            trades = listOf(TradeRecord(1, TradeType.BUY, 50.0, 500, time = now, lotId = 1))
-        )
-        assertEquals(0, brokerSellableQty(account.holdings, account.trades, now))
-        assertEquals(1, triggeredPlanEntries(listOf(account), fees).size)
-    }
-
-    @Test
-    fun theConfiguredFeesAreUsedForTheReturnedOrderEstimates() {
-        val fees = FeeConfig(commissionRate = 0.01, minCommission = 0.0,
-            stampTaxRate = 0.0, transferRate = 0.0)
-        val order = triggeredPlanEntries(listOf(account(55.0)), fees).single().orders.single()
-        assertEquals(445.0, order.estimatedNetProfit!!, 0.000001)
+    @Test fun configuredFeesAndCurrentExecutionPriceArePassedThrough() {
+        val configured = FeeConfig(commissionRate = 0.01, minCommission = 0.0, stampTaxRate = 0.0, transferRate = 0.0)
+        val order = triggeredPlanEntries(listOf(account(5.5)), configured).single().orders.single()
+        assertEquals(5.2, order.triggerPrice!!, 1e-9)
+        assertEquals(5.5, order.price!!, 1e-9)
+        assertEquals(700, order.qty)
+        assertEquals(38.5, order.estimatedFee!!, 1e-9)
+        assertEquals(311.5, order.estimatedNetProfit!!, 1e-9)
     }
 }
