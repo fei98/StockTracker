@@ -136,6 +136,7 @@ import com.example.stocktracker.StockViewModel
 import com.example.stocktracker.ThemePreference
 import com.example.stocktracker.TradeType
 import com.example.stocktracker.TradePlanOrder
+import com.example.stocktracker.PlanAdjustmentInput
 import com.example.stocktracker.triggeredPlanEntries
 import com.example.stocktracker.TrendOutcome
 import com.example.stocktracker.UpdateChecker
@@ -162,7 +163,7 @@ import kotlinx.coroutines.withContext
 import com.example.stocktracker.formatMoney
 import com.example.stocktracker.formatPrice
 import com.example.stocktracker.formatTime
-import com.example.stocktracker.clearedTradeIds
+import com.example.stocktracker.clearedBuyTradeIds
 import com.example.stocktracker.expectedPriceForProfit
 import com.example.stocktracker.pctChangeFromAvgPrice
 import com.example.stocktracker.isSameDay
@@ -177,7 +178,7 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun StockApp() {
+fun StockApp(onLeaveTask: () -> Unit) {
     val context = LocalContext.current
     val vm: StockViewModel = viewModel {
         StockViewModel(PrefsStorage(context), feeStore = FeeConfigStore(context))
@@ -223,11 +224,11 @@ fun StockApp() {
     val intradayLoading by vm.intradayLoading.collectAsStateWithLifecycle()
     var selectedTab by remember { mutableStateOf(0) } // 0 首页 / 1 总览 / 2 我的
     var minePage by remember { mutableStateOf(MinePage.MENU) }
-    // 统一返回契约（覆盖整个 App 的所有"非根"层）：
-    // 1. 先让位于具体界面自身的 BackHandler（如"我的"子页，逐级返回）；
-    // 2. 未被那些界面接管时，这里兜底：总览/我的 tab 按返回回到首页 tab；首页 tab 才交给系统退出。
-    // 后续新增"有上级/可返回"的界面时，在该界面内注册自己的 BackHandler 即可被本契约优先接管。
-    BackHandler(enabled = selectedTab != 0) { selectedTab = 0 }
+    // Keep a terminal callback at the root; legacy OEM fallback dispatch can re-enter back handling.
+    // Later child handlers and dialog windows retain priority over this root handler.
+    BackHandler {
+        if (selectedTab != 0) selectedTab = 0 else onLeaveTask()
+    }
 
     LaunchedEffect(state.message) {
         state.message?.let { msg ->
@@ -347,6 +348,7 @@ fun StockApp() {
                         planMatch = order.match ?: SellMatch.LOWEST
                         planTrade = order
                     },
+                    onPlanAdjustment = { input -> vm.registerPlanAdjustment(input) },
                     onUndo = vm::undoLastTrade,
                     onClear = { showClearDialog = true }
                 )
@@ -373,8 +375,8 @@ fun StockApp() {
     planTrade?.let { order ->
         if (acc != null) {
             TradeDialog(acc.totalQty, planMatch, onSellMatch = { planMatch = it },
-                onBuy = { p, q -> vm.buy(p, q); planTrade = null },
-                onSell = { p, q -> vm.sellWithMatch(p, q, planMatch); planTrade = null },
+                onBuy = { p, q -> vm.recordPlanTrade(order, p, q).also { if (it) planTrade = null } },
+                onSell = { p, q -> vm.recordPlanTrade(order, p, q).also { if (it) planTrade = null } },
                 onDismiss = { planTrade = null },
                 initialIsBuy = order.type == TradeType.BUY,
                 initialPrice = order.price,
@@ -1050,8 +1052,8 @@ private fun TradeDialog(
     totalQty: Int,
     sellMatch: SellMatch,
     onSellMatch: (SellMatch) -> Unit,
-    onBuy: (Double, Int) -> Unit,
-    onSell: (Double, Int) -> Unit,
+    onBuy: (Double, Int) -> Boolean,
+    onSell: (Double, Int) -> Boolean,
     onDismiss: () -> Unit,
     initialIsBuy: Boolean = true,
     initialPrice: Double? = null,
@@ -1074,6 +1076,7 @@ private fun TradeDialog(
                 }
                 SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                     SegmentedButton(
+                        enabled = !isPlanTrade,
                         selected = isBuy,
                         onClick = { isBuy = true },
                         shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
@@ -1083,6 +1086,7 @@ private fun TradeDialog(
                         )
                     ) { Text("买入") }
                     SegmentedButton(
+                        enabled = !isPlanTrade,
                         selected = !isBuy,
                         onClick = { isBuy = false },
                         shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
@@ -1100,6 +1104,7 @@ private fun TradeDialog(
                         Spacer(Modifier.width(8.dp))
                         SellMatch.entries.forEach { m ->
                             FilterChip(
+                                enabled = !isPlanTrade,
                                 selected = sellMatch == m,
                                 onClick = { onSellMatch(m) },
                                 label = { Text(m.label, fontSize = 12.sp) }
@@ -1135,8 +1140,8 @@ private fun TradeDialog(
                     onClick = {
                         val p = price.toDoubleOrNull(); val q = qty.toIntOrNull()
                         if (p != null && q != null) {
-                            if (isBuy) onBuy(p, q) else onSell(p, q)
-                            price = ""; qty = ""
+                            val accepted = if (isBuy) onBuy(p, q) else onSell(p, q)
+                            if (accepted) { price = ""; qty = "" }
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = btnColor),
@@ -1189,10 +1194,12 @@ private fun LotRow(lp: com.example.stocktracker.LotPnl, currentPrice: Double?) {
 
 // Trade history expands in place; only fully sold buy lots are dimmed.
 @Composable
-private fun HistoryPreviewCard(trades: List<com.example.stocktracker.TradeRecord>, onUndo: () -> Unit) {
+private fun HistoryPreviewCard(account: StockAccount, onUndo: () -> Unit) {
+    val trades = account.trades
+    val adjustments = account.planAdjustments
     var expanded by remember { mutableStateOf(false) }
     var showUndoConfirm by remember { mutableStateOf(false) }
-    val clearedIds = remember(trades) { clearedTradeIds(trades) }
+    val clearedIds = remember(trades, account.holdings) { clearedBuyTradeIds(account) }
     SectionCard(title = "交易记录") {
         if (trades.isEmpty()) {
             EmptyText("暂无交易")
@@ -1208,17 +1215,27 @@ private fun HistoryPreviewCard(trades: List<com.example.stocktracker.TradeRecord
                     modifier = Modifier.fillMaxWidth()
                 ) { Text(if (expanded) "收起" else "查看全部 ${trades.size} 条") }
             }
+        }
+        if (adjustments.isNotEmpty()) {
             HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
-            TextButton(
-                onClick = { showUndoConfirm = true },
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("撤销最后一笔交易", fontSize = 12.sp, color = MaterialTheme.colorScheme.error) }
+            Text("最近权益登记", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            adjustments.asReversed().take(3).forEach { adjustment ->
+                Text("${formatTime(adjustment.time)} · 净现金 ${formatMoney(adjustment.input.netCash)}元 · 新增 ${adjustment.input.addedShares}股",
+                    fontSize = 11.sp, modifier = Modifier.padding(vertical = 4.dp))
+            }
+        }
+        if (trades.isNotEmpty() || adjustments.isNotEmpty()) {
+            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+            TextButton(onClick = { showUndoConfirm = true }, modifier = Modifier.fillMaxWidth()) {
+                Text("撤销最后一笔操作", fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+            }
         }
     }
-    // 撤销二次确认：防误触（撤销不可逆）
+    // Confirm the actual latest operation, including a corporate-action-only history.
     if (showUndoConfirm) {
         val last = trades.lastOrNull()
-        val typeLabel = when (last?.type) {
+        val lastAdjustment = adjustments.lastOrNull()?.takeIf { it.id > (last?.id ?: 0L) }
+        val typeLabel = if (lastAdjustment != null) "权益登记" else when (last?.type) {
             TradeType.BUY -> "买入"
             TradeType.SELL -> "卖出"
             else -> "交易"
@@ -1228,7 +1245,8 @@ private fun HistoryPreviewCard(trades: List<com.example.stocktracker.TradeRecord
             title = { Text("撤销$typeLabel") },
             text = {
                 Text(
-                    "确定要撤销最后一笔${last?.let { "${formatPrice(it.price)} 元 × ${it.qty} 股" } ?: ""}吗？此操作不可恢复。"
+                    if (lastAdjustment != null) "确定撤销净现金${formatMoney(lastAdjustment.input.netCash)}元、新增${lastAdjustment.input.addedShares}股的登记吗？将恢复持仓与策略状态。"
+                    else "确定要撤销最后一笔${last?.let { "${formatPrice(it.price)} 元 × ${it.qty} 股" } ?: ""}吗？将同时恢复本轮策略状态。"
                 )
             },
             confirmButton = {
@@ -1496,6 +1514,7 @@ private fun HomeScreen(
     feeConfig: FeeConfig,
     onPlanSettings: () -> Unit,
     onPlanTrade: (TradePlanOrder) -> Unit,
+    onPlanAdjustment: (PlanAdjustmentInput) -> Boolean,
     onUndo: () -> Unit,
     onClear: () -> Unit
 ) {
@@ -1549,14 +1568,14 @@ private fun HomeScreen(
                         onIntraday = onIntraday
                     )
                 }
-                item { TradePlanCard(acc, feeConfig, onPlanSettings, onPlanTrade) }
+                item { TradePlanCard(acc, feeConfig, onPlanSettings, onPlanTrade, onAdjustment = onPlanAdjustment) }
                 item {
                     if (acc != null) {
                         WeeklyTrendCard(weekUi = weekUi, onRefresh = onRefreshTrend)
                     }
                 }
                 item { HoldingsCard(acc) }
-                item { HistoryPreviewCard(acc.trades, onUndo = onUndo) }
+                item { HistoryPreviewCard(acc, onUndo = onUndo) }
                 item {
                     Row(
                         Modifier.fillMaxWidth(),

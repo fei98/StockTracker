@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "presets": [
+    {
+      "marketCode": "sz002396",
+      "name": "星网锐捷",
+      "lowerCost": 10000,
+      "upperCost": 30000,
+      "orderAmount": 8000,
+      "stepPercent": 8,
+      "capital": 50000
+    }
+  ]
+}

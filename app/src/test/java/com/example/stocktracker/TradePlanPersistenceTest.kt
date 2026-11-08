@@ -7,80 +7,124 @@ import org.junit.Test
 
 class TradePlanPersistenceTest {
     @get:Rule val main = MainDispatcherRule()
-    private val plan = TradePlanConfig(referencePrice = 5.0, startAfterTradeId = 10)
-    private val first = StockAccount(Stock("000001", "First", "sz"),
-        holdings = listOf(BuyLot(1, 5.0, 5000, 5000)), tradePlan = plan)
-    private val second = StockAccount(Stock("000002", "Second", "sz"),
-        tradePlan = plan.copy(lowerCost = 2000.0, upperCost = 20000.0, orderAmount = 2000.0, stepPercent = 3.0))
+    private val fees = FeeConfig(0.0, 0.0, 0.0, 0.0)
+    private val config = TradePlanConfig(lowerCost = 10000.0, upperCost = 30000.0,
+        orderAmount = 8000.0, stepPercent = 8.0, referencePrice = 20.0,
+        capital = 50000.0, initialCash = 30000.0)
 
-    @Test fun independentStockSettingsAndAccountingDataRoundTrip() {
+    private fun active(code: String = "002396", activation: Long = 11L): StockAccount = startTradePlan(
+        StockAccount(Stock(code, "Example", "sz"),
+            holdings = listOf(BuyLot(1, 20.0, 1000, 1000)), currentPrice = 20.0),
+        config, activation)
+
+    private fun objectOf(account: StockAccount): JSONObject =
+        JSONObject(buildState(StockState(listOf(account), 0)))
+
+    @Test fun independentConfiguredStocksAndRuntimeRoundTrip() {
+        val first = active()
+        val second = startTradePlan(StockAccount(Stock("000001", "Second", "sz")),
+            config.copy(lowerCost = 2000.0, upperCost = 20000.0, orderAmount = 2000.0,
+                stepPercent = 3.0, initialCash = 50000.0), 12L)
         val state = StockState(accounts = listOf(first, second), selectedIndex = 1)
         assertEquals(state, parseState(buildState(state)))
+        assertEquals(3, objectOf(first).getJSONArray("accounts").getJSONObject(0).getJSONObject("tradePlan").getInt("version"))
     }
 
     @Test fun stateWithoutSettingsStillRestoresHoldings() {
-        val state = StockState(listOf(first.copy(tradePlan = null)), 0)
-        val json = JSONObject(buildState(state))
-        json.getJSONArray("accounts").getJSONObject(0).remove("tradePlan")
-        assertEquals(state, parseState(json.toString()))
+        val account = active().copy(tradePlan = null, tradePlanState = null)
+        val root = objectOf(account)
+        root.getJSONArray("accounts").getJSONObject(0).remove("tradePlan")
+        root.getJSONArray("accounts").getJSONObject(0).remove("tradePlanState")
+        assertEquals(account, parseState(root.toString()).selected)
     }
 
-    @Test fun invalidNewSettingsDoNotDiscardStocksOrTrades() {
-        val json = JSONObject(buildState(StockState(listOf(first), 0)))
-        json.getJSONArray("accounts").getJSONObject(0).getJSONObject("tradePlan").put("stepPercent", 0.0)
-        assertEquals(first.copy(tradePlan = null), parseState(json.toString()).selected)
+    @Test fun invalidNewSettingsArePreservedButCannotRun() {
+        val original = active()
+        val root = objectOf(original)
+        val jsonPlan = root.getJSONArray("accounts").getJSONObject(0).getJSONObject("tradePlan")
+        jsonPlan.put("stepPercent", 0.0)
+        val restored = parseState(root.toString()).selected!!
+        assertEquals(original.holdings, restored.holdings)
+        assertTrue(restored.tradePlan!!.needsSetup)
+        assertNull(restored.tradePlanState)
+        assertNull(evaluateTradePlan(restored, fees))
+        val saved = objectOf(restored).getJSONArray("accounts").getJSONObject(0).getJSONObject("tradePlan")
+        assertTrue(jsonPlan.similar(saved))
     }
 
-    @Test fun oldThresholdSettingsRemainIntactButCannotGenerateNewSignals() {
+    @Test fun oldThresholdSettingsRemainIntactAndDisabled() {
         val old = JSONObject().put("thresholdMode", "QUANTITY").put("threshold", 400)
             .put("unitQty", 100).put("stepMode", "PRICE").put("step", 5.0)
             .put("referencePrice", 50.0).put("startAfterTradeId", 9)
-        val json = JSONObject(buildState(StockState(listOf(first), 0)))
-        json.getJSONArray("accounts").getJSONObject(0).put("tradePlan", old)
-        val restored = parseState(json.toString())
-        assertTrue(restored.selected!!.tradePlan!!.needsSetup)
-        assertNull(evaluateTradePlan(restored.selected!!, FeeConfig()))
-        val saved = JSONObject(buildState(restored)).getJSONArray("accounts").getJSONObject(0).getJSONObject("tradePlan")
-        assertTrue(old.similar(saved))
-        assertEquals(first.holdings, restored.selected!!.holdings)
+        val root = objectOf(active())
+        root.getJSONArray("accounts").getJSONObject(0).put("tradePlan", old)
+        val restored = parseState(root.toString()).selected!!
+        assertTrue(restored.tradePlan!!.needsSetup)
+        assertNull(restored.tradePlanState)
+        assertNull(evaluateTradePlan(restored, fees))
+        assertTrue(old.similar(objectOf(restored).getJSONArray("accounts").getJSONObject(0).getJSONObject("tradePlan")))
     }
 
-    @Test fun savingNewSettingsReplacesLegacySettingsOnlyForTheSelectedStock() {
-        val old = plan.copy(legacyJson = "{\"threshold\":400,\"unitQty\":100}")
-        val storage = FakeStorage().apply { loaded = StockState(listOf(first.copy(tradePlan = old), second), 0) }
-        val vm = StockViewModel(storage)
-        assertTrue(vm.configureTradePlan(plan))
-        assertEquals(plan, vm.state.value.selected!!.tradePlan)
-        assertEquals(second, vm.state.value.accounts[1])
-        assertEquals(vm.state.value.accounts, storage.saved.last().accounts)
-        assertTrue(vm.configureTradePlan(null))
-        assertNull(vm.state.value.selected!!.tradePlan)
-    }
-
-    @Test fun invalidConfigurationDoesNotReplaceExistingSettings() {
-        val storage = FakeStorage().apply { loaded = StockState(listOf(first), 0) }
-        val vm = StockViewModel(storage)
-        assertFalse(vm.configureTradePlan(plan.copy(upperCost = plan.lowerCost)))
-        assertEquals(plan, vm.state.value.selected!!.tradePlan)
+    @Test fun versionTwoRetainsReadableParametersAndRawSettings() {
+        val old = JSONObject().put("version", 2).put("lowerCost", 7000.0).put("upperCost", 32000.0)
+            .put("orderAmount", 6000.0).put("stepPercent", 6.0).put("referencePrice", 18.0)
+            .put("startAfterTradeId", 99)
+        val root = objectOf(active())
+        root.getJSONArray("accounts").getJSONObject(0).put("tradePlan", old)
+        val restored = parseState(root.toString()).selected!!
+        val plan = restored.tradePlan!!
+        assertTrue(plan.needsSetup)
+        assertEquals(7000.0, plan.lowerCost, 0.0)
+        assertEquals(32000.0, plan.upperCost, 0.0)
+        assertEquals(6000.0, plan.orderAmount, 0.0)
+        assertEquals(6.0, plan.stepPercent, 0.0)
+        assertNull(restored.tradePlanState)
+        assertTrue(old.similar(objectOf(restored).getJSONArray("accounts").getJSONObject(0).getJSONObject("tradePlan")))
     }
 
     @Test fun unsupportedFutureSettingsRemainDisabledAndSurviveSaving() {
         val raw = "{\"version\":99,\"futureField\":123}"
-        val state = StockState(listOf(first.copy(tradePlan = plan.copy(legacyJson = raw))), 0)
-        val restored = parseState(buildState(state))
-        assertTrue(restored.selected!!.tradePlan!!.needsSetup)
-        assertTrue(JSONObject(raw).similar(JSONObject(restored.selected!!.tradePlan!!.legacyJson!!)))
+        val account = active().copy(tradePlan = config.copy(legacyJson = raw))
+        val restored = parseState(buildState(StockState(listOf(account), 0))).selected!!
+        assertTrue(restored.tradePlan!!.needsSetup)
+        assertNull(restored.tradePlanState)
+        assertTrue(JSONObject(raw).similar(JSONObject(restored.tradePlan!!.legacyJson!!)))
     }
 
-    @Test fun oneTradeMatchingAndUndoKeepTheGlobalPreferenceAndPlan() {
-        val storage = FakeStorage().apply { loaded = StockState(listOf(first.copy(
-            holdings = first.holdings + BuyLot(2, 4.0, 100, 100))), 0) }
-        val vm = StockViewModel(storage, initialFeeConfig = FeeConfig(0.0, 0.0, 0.0, 0.0))
-        val original = vm.state.value.selected!!
-        vm.sellWithMatch(3.5, 100, SellMatch.HIGHEST)
+    @Test fun savingSettingsActivatesOnlySelectedStockAndDoesNotOverwriteOtherParameters() {
+        val first = active()
+        val second = active("000001", 12L)
+        val storage = FakeStorage().apply { loaded = StockState(listOf(first, second), 0) }
+        val vm = StockViewModel(storage, initialFeeConfig = fees)
+        val changed = config.copy(lowerCost = 6000.0, upperCost = 24000.0, orderAmount = 3000.0, stepPercent = 5.0)
+        assertTrue(vm.configureTradePlan(changed))
+        assertEquals(6000.0, vm.state.value.selected!!.tradePlan!!.lowerCost, 0.0)
+        assertEquals(3000.0, vm.state.value.selected!!.tradePlan!!.orderAmount, 0.0)
+        assertNotNull(vm.state.value.selected!!.tradePlanState)
+        assertEquals(second, vm.state.value.accounts[1])
+        assertEquals(vm.state.value.accounts, storage.saved.last().accounts)
+        assertTrue(vm.configureTradePlan(null))
+        assertNull(vm.state.value.selected!!.tradePlan)
+        assertNull(vm.state.value.selected!!.tradePlanState)
+    }
+
+    @Test fun invalidConfigurationDoesNotReplaceCurrentSettingsOrRuntime() {
+        val original = active()
+        val vm = StockViewModel(FakeStorage().apply { loaded = StockState(listOf(original), 0) })
+        assertFalse(vm.configureTradePlan(config.copy(upperCost = config.lowerCost)))
+        assertEquals(original, vm.state.value.selected)
+    }
+
+    @Test fun matchingAndUndoPreserveCurrentPlanAndGlobalPreference() {
+        val account = active().copy(holdings = active().holdings + BuyLot(2, 18.0, 100, 100))
+        val original = startTradePlan(account, config, 15L)
+        val store = FakeStorage().apply { loaded = StockState(listOf(original), 0) }
+        val vm = StockViewModel(store, initialFeeConfig = fees)
+        vm.sellWithMatch(21.0, 100, SellMatch.HIGHEST)
+        val after = vm.state.value.selected!!
         assertEquals(SellMatch.LOWEST, vm.state.value.sellMatch)
-        assertEquals(4900, vm.state.value.selected!!.holdings.first { it.id == 1L }.remainingQty)
-        assertEquals(plan, vm.state.value.selected!!.tradePlan)
+        assertNotNull(after.trades.last().planBefore)
+        assertEquals(after, parseState(buildState(vm.state.value)).selected)
         vm.undoLastTrade()
         assertEquals(original, vm.state.value.selected)
     }

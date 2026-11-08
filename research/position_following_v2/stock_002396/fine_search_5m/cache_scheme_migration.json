@@ -1,0 +1,25 @@
+{
+  "at_utc": "2026-11-07T15:11:23.478859+00:00",
+  "old": "cac8767554ebf3dcfb6f3a8998116959b74d92d128924c79b7553e6e99fc955c",
+  "new": "b0e41d1cf9034d9eb16aaf75cef077603f5048af6369a585c635bf029a9f46c4",
+  "reason": "Exclude ranking-only code from simulation metric cache; added rejection of duplicate/self neighbors. All metric rows, training hash, seeds and locked candidate independently rechecked unchanged.",
+  "training_hash_unchanged": "4d96d395970f351daaf2721fbd7cf4f830fbc8f3b69406b5927760cf5c437a3e",
+  "locked_candidate_unchanged": "L7500_U50000_S10_A9000",
+  "cache_rows": [
+    {
+      "scope": "train",
+      "unchanged_rows_sha256": "4d96d395970f351daaf2721fbd7cf4f830fbc8f3b69406b5927760cf5c437a3e",
+      "rows": 1467
+    },
+    {
+      "scope": "validation",
+      "unchanged_rows_sha256": "ecdf2197c63cc93676ae7cc6e353897a092eb5cbed607b9e7317b8dadba04beb",
+      "rows": 1179
+    },
+    {
+      "scope": "full",
+      "unchanged_rows_sha256": "4413bdc44747ba28cedf43c9451f33c11ffff1c7d150b78f1fa6da0334a935bd",
+      "rows": 1179
+    }
+  ]
+}

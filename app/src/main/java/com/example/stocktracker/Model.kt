@@ -54,7 +54,8 @@ data class TradeRecord(
     val fee: Double = 0.0,
     val costFee: Double = 0.0,
     val lotId: Long? = null,
-    val soldLots: List<SoldLot> = emptyList()
+    val soldLots: List<SoldLot> = emptyList(),
+    val planBefore: TradePlanRuntime? = null
 ) {
     /** 本次交易成本：买入 = 成交金额；卖出 = 被卖出持仓对应的裸成本（成交金额 - 盈亏） */
     val cost: Double get() = if (type == TradeType.BUY) price * qty else price * qty - profit
@@ -219,7 +220,10 @@ data class StockAccount(
     val currentPrice: Double? = null,
     val prevClose: Double? = null,      // 昨收（刷新行情时记录，用于涨跌幅）
     val totalBuyFee: Double = 0.0,      // Accumulated buy fees, including closed lots.
-    val tradePlan: TradePlanConfig? = null
+    val tradePlan: TradePlanConfig? = null,
+    val tradePlanState: TradePlanRuntime? = null,
+    val planAdjustments: List<PlanAdjustmentRecord> = emptyList(),
+    val planRecoveryData: List<String> = emptyList()
 ) {
     /** 总持仓数量 */
     val totalQty: Int get() = holdings.sumOf { it.remainingQty }
@@ -235,9 +239,7 @@ data class StockAccount(
      * 可卖数量：港美股 T+0 = 全部持仓；A 股按券商 T+1 视角重算（卖出只抵"当时可卖"批次，
      * 与 App 记账"最低价优先/不限 T+1"解耦，避免当日补仓低价被抵用后可卖数虚高）。
      */
-    val sellableQty: Int get() =
-        if (stock.market == "hk" || stock.market == "us") totalQty
-        else brokerSellableQty(holdings, trades, System.currentTimeMillis())
+    val sellableQty: Int get() = tradePlanSellableQty(this, System.currentTimeMillis())
 
     /** 持仓总成本（裸价，不含手续费） */
     val totalCost: Double get() = holdings.sumOf { it.price * it.remainingQty }
@@ -266,7 +268,8 @@ data class StockAccount(
     val realizedPnlFee: Double
         get() {
             val sells = trades.filter { it.type == TradeType.SELL }
-            return sells.sumOf { it.profit } - sells.sumOf { it.fee } - sells.sumOf { it.costFee }
+            return sells.sumOf { it.profit } - sells.sumOf { it.fee } - sells.sumOf { it.costFee } +
+                planAdjustments.sumOf { it.input.netCash }
         }
 
     /** 浮动盈亏（含费） */
@@ -472,4 +475,11 @@ fun clearedTradeIds(trades: List<TradeRecord>): Set<Long> {
     sales.filter { it.fullyMatched && it.consumed.isNotEmpty() && it.consumed.all { lot -> lot.remaining == 0 } }
         .forEach { cleared += it.tradeId }
     return cleared
+}
+
+/** Current inventory remains authoritative after bonus shares or mixed matching strategies. */
+fun clearedBuyTradeIds(account: StockAccount): Set<Long> {
+    val openLots = account.holdings.filter { it.remainingQty > 0 }.mapTo(mutableSetOf()) { it.id }
+    return account.trades.filter { it.type == TradeType.BUY && (it.lotId ?: it.id) !in openLots }
+        .mapTo(mutableSetOf()) { it.id }
 }

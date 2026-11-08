@@ -1,0 +1,25 @@
+{
+  "at_utc": "2026-11-07T15:18:38.244025+00:00",
+  "old": "b0e41d1cf9034d9eb16aaf75cef077603f5048af6369a585c635bf029a9f46c4",
+  "new": "41b2968e7e32c77bc98221d86eb170c93bda80012de464ef505cf7373f544e6f",
+  "reason": "Added all transitive simulation helpers, worker partition code and SPLIT to metric cache dependency fingerprint; underlying source code and all metric rows unchanged.",
+  "training_hash_unchanged": "4d96d395970f351daaf2721fbd7cf4f830fbc8f3b69406b5927760cf5c437a3e",
+  "candidate_unchanged": "L7500_U50000_S10_A9000",
+  "cache_rows": [
+    {
+      "scope": "train",
+      "unchanged_rows_sha256": "4d96d395970f351daaf2721fbd7cf4f830fbc8f3b69406b5927760cf5c437a3e",
+      "rows": 1467
+    },
+    {
+      "scope": "validation",
+      "unchanged_rows_sha256": "ecdf2197c63cc93676ae7cc6e353897a092eb5cbed607b9e7317b8dadba04beb",
+      "rows": 1179
+    },
+    {
+      "scope": "full",
+      "unchanged_rows_sha256": "4413bdc44747ba28cedf43c9451f33c11ffff1c7d150b78f1fa6da0334a935bd",
+      "rows": 1179
+    }
+  ]
+}

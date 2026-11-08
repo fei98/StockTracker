@@ -11,6 +11,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class StockViewModel(
     private val storage: Storage? = null,
@@ -61,6 +63,11 @@ class StockViewModel(
 
     private var nextId = 1L
     private var searchSeq = 0
+    private val saveMutex = Mutex()
+    private var quoteRequestSequence = 0L
+    private val latestQuoteRequests = mutableMapOf<String, Long>()
+
+    private fun newQuoteRequest(key: String): Long = (++quoteRequestSequence).also { latestQuoteRequests[key] = it }
 
     /** 更新费率设置 */
     fun updateFeeConfig(c: FeeConfig) {
@@ -85,7 +92,9 @@ class StockViewModel(
             _state.value = s
             nextId = maxOf(
                 s.accounts.flatMap { it.holdings.map { h -> h.id } }.maxOrNull() ?: 0L,
-                s.accounts.flatMap { it.trades.map { t -> t.id } }.maxOrNull() ?: 0L
+                s.accounts.flatMap { it.trades.map { t -> t.id } }.maxOrNull() ?: 0L,
+                s.accounts.flatMap { it.planAdjustments.map { adjustment -> adjustment.id } }.maxOrNull() ?: 0L,
+                s.accounts.mapNotNull { it.tradePlan?.activationId }.maxOrNull() ?: 0L
             ) + 1
             _state.update { it.copy(message = if (s.accounts.isNotEmpty()) "已恢复上次保存的数据" else null) }
             if (s.accounts.isNotEmpty()) persist()
@@ -95,7 +104,7 @@ class StockViewModel(
     /** 每次数据变更后异步保存到本地 */
     private fun persist() {
         val snapshot = _state.value
-        storage?.let { st -> viewModelScope.launch { st.save(snapshot) } }
+        storage?.let { st -> viewModelScope.launch { saveMutex.withLock { st.save(snapshot) } } }
     }
 
     // ---------------- 股票管理 ----------------
@@ -169,6 +178,7 @@ class StockViewModel(
         val s = _state.value
         val acc = s.accounts.getOrNull(index) ?: return
         val name = acc.stock.name
+        newQuoteRequest(acc.stock.marketCode)
         val newAccounts = s.accounts.filterIndexed { i, _ -> i != index }
         val newIndex = when {
             newAccounts.isEmpty() -> -1
@@ -189,12 +199,18 @@ class StockViewModel(
     /** 刷新选中股票的实时价格并作为现价 */
     fun refreshPrice() {
         val stock = _state.value.selected?.stock ?: return
+        val token = newQuoteRequest(stock.marketCode)
         viewModelScope.launch {
             val quote = withContext(Dispatchers.IO) { api.fetchQuote(stock) }
             _state.update { s ->
-                if (quote?.price == null) s.copy(message = "行情刷新失败，请检查网络")
+                if (latestQuoteRequests[stock.marketCode] != token || s.accounts.none { it.stock.marketCode == stock.marketCode }) s
+                else if (quote?.price == null || !quote.price.isFinite() || quote.price <= 0) s.copy(message = "行情刷新失败，请检查网络")
                 else s.copy(
-                    accounts = updateSelected(s) { it.copy(currentPrice = quote.price, prevClose = quote.prevClose) },
+                    accounts = s.accounts.map { account ->
+                        if (account.stock.marketCode == stock.marketCode) {
+                            observeTradePlanQuote(account, quote.price).copy(prevClose = quote.prevClose)
+                        } else account
+                    },
                     message = "已刷新现价：${formatPrice(quote.price)} 元"
                 )
             }
@@ -206,19 +222,22 @@ class StockViewModel(
     fun refreshAll() {
         val stocks = _state.value.accounts.map { it.stock }
         if (stocks.isEmpty()) return
+        val tokens = stocks.associate { it.marketCode to newQuoteRequest(it.marketCode) }
         viewModelScope.launch {
             val results = stocks.map { stock -> async { stock to api.fetchQuote(stock) } }.awaitAll()
-            val fetched = results.filter { it.second?.price != null }
             _state.update { s ->
-                if (fetched.isEmpty()) s.copy(message = "行情刷新失败，请检查网络")
+                val current = results.filter { latestQuoteRequests[it.first.marketCode] == tokens[it.first.marketCode] }
+                val fetched = current.filter { it.second?.price?.let { price -> price.isFinite() && price > 0 } == true }
+                if (current.isEmpty()) s
+                else if (fetched.isEmpty()) s.copy(message = "行情刷新失败，请检查网络")
                 else {
                     val accounts = s.accounts.map { a ->
                         val quote = fetched.firstOrNull { it.first.code == a.stock.code && it.first.market == a.stock.market }?.second
-                        if (quote?.price != null) a.copy(currentPrice = quote.price, prevClose = quote.prevClose) else a
+                        if (quote?.price != null) observeTradePlanQuote(a, quote.price).copy(prevClose = quote.prevClose) else a
                     }
                     s.copy(
                         accounts = accounts,
-                        message = "已刷新全部行情（${fetched.size}/${stocks.size} 只）"
+                        message = "已刷新全部行情（${fetched.size}/${current.size} 只）"
                     )
                 }
             }
@@ -228,67 +247,90 @@ class StockViewModel(
 
     // ---------------- 买入/卖出（作用于当前选中股票） ----------------
 
-    fun buy(price: Double, qty: Int, time: Long = System.currentTimeMillis()) {
-        if (price <= 0 || qty <= 0) { notify("请输入正确的单价和数量"); return }
-        val idx = _state.value.selectedIndex
-        if (idx < 0) { notify("请先添加并选择股票"); return }
-        val buyFee = feeConfig.buyFee(price * qty)
-        val lot = BuyLot(id = nextId++, price = price, originalQty = qty, remainingQty = qty, time = time, fee = buyFee)
-        _state.update { s ->
-            s.copy(
-                accounts = updateSelected(s) { a ->
-                    a.copy(
-                        holdings = a.holdings + lot,
-                        trades = a.trades + TradeRecord(nextId++, TradeType.BUY, price, qty, time = time, fee = buyFee, lotId = lot.id),
-                        totalBuyFee = a.totalBuyFee + buyFee
-                    )
-                },
-                message = "买入成功：${formatPrice(price)} 元 × $qty 股（手续费 ${formatMoney(buyFee)} 元）"
-            )
-        }
-        persist()
-    }
+    fun buy(price: Double, qty: Int, time: Long = System.currentTimeMillis()): Boolean =
+        recordTrade(TradeType.BUY, price, qty, SellMatch.LOWEST, time)
 
-    /**
-     * 卖出：按当前匹配策略抵扣持仓（默认最低价优先，可选最高价优先），不区分买入日期，T+1 不限制记账。
-     * 例如持仓含 1元100、3元300、5元200，卖出300股 @4元（最低价优先）：
-     *   先抵扣1元100股（盈利300），再抵扣3元200股（盈利200），合计盈利500，3元剩100股。
-     */
-    fun sell(price: Double, qty: Int) {
+    fun sell(price: Double, qty: Int): Boolean =
         sellWithMatch(price, qty, _state.value.sellMatch)
+
+    fun sellWithMatch(price: Double, qty: Int, strategy: SellMatch, time: Long = System.currentTimeMillis()): Boolean =
+        recordTrade(TradeType.SELL, price, qty, strategy, time)
+
+    fun recordPlanTrade(order: TradePlanOrder, price: Double, qty: Int, time: Long = System.currentTimeMillis()): Boolean {
+        val account = _state.value.selected ?: run { notify("请先添加并选择股票"); return false }
+        val error = validateTradePlanFill(account, order, price, qty, feeConfig, time)
+        if (error != null) { notify(error); return false }
+        val type = order.type ?: return false
+        return recordTrade(type, price, qty, order.match ?: SellMatch.LOWEST, time, order)
     }
 
-    /** A plan-specific match applies to this trade without changing the global preference. */
-    fun sellWithMatch(price: Double, qty: Int, strategy: SellMatch) {
-        if (price <= 0 || qty <= 0) { notify("请输入正确的单价和数量"); return }
-        val s = _state.value
-        val acc = s.selected ?: run { notify("请先添加并选择股票"); return }
-        if (acc.totalQty <= 0) { notify("当前无持仓，无法卖出"); return }
-        if (qty > acc.totalQty) { notify("卖出数量超过持仓数量（${acc.totalQty} 股）"); return }
-
-        val m = matchSellLots(acc.holdings, qty, price, strategy)
-
-        val sellFee = feeConfig.sellFee(price * qty)
-        _state.update {
-            it.copy(
-                accounts = updateSelected(it) { a ->
-                    a.copy(
-                        holdings = m.remaining,
-                        trades = a.trades + TradeRecord(
-                            nextId++, TradeType.SELL, price, qty, m.profit,
-                            fee = sellFee, costFee = m.costFee, soldLots = m.soldLots
-                        )
-                    )
-                },
-                message = "卖出成功：${formatPrice(price)} 元 × $qty 股，净盈亏 ${formatMoney(m.profit - sellFee - m.costFee)} 元（费用 ${formatMoney(sellFee + m.costFee)} 元）"
-            )
+    /** Actual manual fills remain recordable even when they deviate from the suggested strategy. */
+    private fun recordTrade(type: TradeType, price: Double, qty: Int, strategy: SellMatch, time: Long,
+                            order: TradePlanOrder? = null): Boolean {
+        if (!price.isFinite() || price <= 0 || qty <= 0 || !(price * qty).isFinite()) {
+            notify("请输入正确的单价和数量"); return false
+        }
+        val account = _state.value.selected ?: run { notify("请先添加并选择股票"); return false }
+        if (type == TradeType.BUY && account.totalQty.toLong() + qty > Int.MAX_VALUE) {
+            notify("买入后股数超出支持范围"); return false
+        }
+        if (type == TradeType.SELL && qty > account.totalQty) {
+            notify(if (account.totalQty <= 0) "当前无持仓，无法卖出" else "卖出数量超过持仓数量（${account.totalQty} 股）")
+            return false
+        }
+        val fees = effectiveTradeFees(account.stock, feeConfig)
+        val fee = if (type == TradeType.BUY) fees.buyFee(price * qty) else fees.sellFee(price * qty)
+        if (!fee.isFinite() || fee < 0) { notify("费率配置异常，请检查设置"); return false }
+        val trade: TradeRecord
+        val after: StockAccount
+        if (type == TradeType.BUY) {
+            val lot = BuyLot(nextId++, price, qty, qty, time, fee)
+            trade = TradeRecord(nextId++, type, price, qty, time = time, fee = fee, lotId = lot.id)
+            after = account.copy(holdings = account.holdings + lot, trades = account.trades + trade,
+                totalBuyFee = account.totalBuyFee + fee)
+        } else {
+            val sale = matchSellLots(account.holdings, qty, price, strategy)
+            if (!sale.profit.isFinite() || !sale.costFee.isFinite()) { notify("持仓数据异常，请核对批次"); return false }
+            trade = TradeRecord(nextId++, type, price, qty, sale.profit, time, fee, sale.costFee, soldLots = sale.soldLots)
+            after = account.copy(holdings = sale.remaining, trades = account.trades + trade)
+        }
+        val updated = afterTradePlanFill(account, after, trade, order?.gridIndex)
+        newQuoteRequest(account.stock.marketCode)
+        _state.update { state ->
+            state.copy(accounts = updateSelected(state) { updated }, message =
+                if (type == TradeType.BUY) "买入成功：${formatPrice(price)} 元 × $qty 股（手续费 ${formatMoney(fee)} 元）"
+                else "卖出成功：${formatPrice(price)} 元 × $qty 股，净盈亏 ${formatMoney(trade.netProfit)} 元")
         }
         persist()
+        return true
     }
 
     fun configureTradePlan(config: TradePlanConfig?): Boolean {
-        if (_state.value.selected == null || (config != null && !config.isValid)) return false
-        _state.update { s -> s.copy(accounts = updateSelected(s) { it.copy(tradePlan = config) }) }
+        val account = _state.value.selected ?: return false
+        if (config != null && !config.isValid) { notify("请检查策略参数与可用现金"); return false }
+        val updated = if (config == null) account.copy(tradePlan = null, tradePlanState = null) else {
+            val cutoff = account.trades.maxOfOrNull { it.id } ?: 0L
+            val prepared = config.copy(startAfterTradeId = cutoff, legacyJson = null)
+            runCatching { startTradePlan(account, prepared, nextId++) }.getOrElse {
+                notify("无法按当前持仓启用策略，请核对参数与批次"); return false
+            }
+        }
+        _state.update { s -> s.copy(accounts = updateSelected(s) { updated },
+            message = if (config == null) "已关闭此股票策略" else "已按当前持仓和现金重新起算，阶段为正向") }
+        newQuoteRequest(account.stock.marketCode)
+        persist()
+        return true
+    }
+
+    fun registerPlanAdjustment(input: PlanAdjustmentInput, time: Long = System.currentTimeMillis()): Boolean {
+        val account = _state.value.selected ?: return false
+        val error = validateTradePlanAdjustment(account, input)
+        if (error != null) { notify(error); return false }
+        val updated = runCatching { applyTradePlanAdjustment(account, input, time, nextId++) }.getOrElse {
+            notify("登记失败，请核对到账现金、股数和除权参数"); return false
+        }
+        newQuoteRequest(account.stock.marketCode)
+        _state.update { state -> state.copy(accounts = updateSelected(state) { updated }, message = "已登记权益变动并校准网格") }
         persist()
         return true
     }
@@ -300,16 +342,32 @@ class StockViewModel(
         persist()
     }
 
-    /**
-     * 撤销最后一笔交易（防止写错）：
-     * - 撤销买入：仅当该批次仍完整在持仓（未被后续卖出消耗）时执行，移除批次并退回买入手续费。
-     * - 撤销卖出：按卖出时记录的批次明细原样恢复持仓（旧数据无明细时拒绝）。
-     */
+    /** Undo the latest ledger operation and its same-epoch strategy snapshot together. */
     fun undoLastTrade() {
         val idx = _state.value.selectedIndex
         if (idx < 0) { notify("请先添加并选择股票"); return }
         val acc = _state.value.accounts.getOrNull(idx) ?: return
-        val last = acc.trades.lastOrNull() ?: run { notify("没有可撤销的交易"); return }
+        val latestAdjustment = acc.planAdjustments.lastOrNull()
+        val latestTrade = acc.trades.lastOrNull()
+        val active = acc.tradePlanState != null && acc.tradePlan?.isValid == true
+        if (latestAdjustment != null && (latestTrade == null || latestAdjustment.id > latestTrade.id)) {
+            if (active && latestAdjustment.beforePlanState?.activationId != acc.tradePlan?.activationId) {
+                notify("该操作早于本轮策略起点，请先关闭策略再撤销"); return
+            }
+            val restored = acc.copy(holdings = latestAdjustment.beforeHoldings,
+                tradePlanState = if (active) latestAdjustment.beforePlanState else null,
+                currentPrice = latestAdjustment.beforeCurrentPrice, prevClose = latestAdjustment.beforePrevClose,
+                planAdjustments = acc.planAdjustments.dropLast(1))
+            newQuoteRequest(acc.stock.marketCode)
+            _state.update { state -> state.copy(accounts = updateSelected(state) { restored }, message = "已撤销权益登记，持仓与策略状态已恢复") }
+            persist()
+            return
+        }
+        val last = latestTrade ?: run { notify("没有可撤销的操作"); return }
+        if (active && (last.id <= (acc.tradePlan?.startAfterTradeId ?: 0L) ||
+                    last.planBefore?.activationId != acc.tradePlan?.activationId)) {
+            notify("该交易早于本轮策略起点或缺少快照，请先关闭策略再撤销"); return
+        }
         when (last.type) {
             TradeType.BUY -> {
                 val lotId = last.lotId
@@ -329,7 +387,8 @@ class StockViewModel(
                             a.copy(
                                 holdings = a.holdings.filterNot { it.id == lot.id },
                                 trades = a.trades.dropLast(1),
-                                totalBuyFee = a.totalBuyFee - last.fee
+                                totalBuyFee = a.totalBuyFee - last.fee,
+                                tradePlanState = if (active) last.planBefore else null
                             )
                         },
                         message = "已撤销买入：${formatPrice(last.price)} 元 × ${last.qty} 股（退回手续费 ${formatMoney(last.fee)} 元）"
@@ -354,24 +413,33 @@ class StockViewModel(
                                     holdings += BuyLot(sl.lotId, sl.price, sl.originalQty, sl.qty, sl.time, sl.fee)
                                 }
                             }
-                            a.copy(holdings = holdings, trades = a.trades.dropLast(1))
+                            a.copy(holdings = holdings, trades = a.trades.dropLast(1),
+                                tradePlanState = if (active) last.planBefore else null)
                         },
                         message = "已撤销卖出：${formatPrice(last.price)} 元 × ${last.qty} 股，持仓已恢复"
                     )
                 }
             }
         }
+        _state.update { state -> state.copy(accounts = updateSelected(state) { restored ->
+            restored.currentPrice?.takeIf { it.isFinite() && it > 0 }?.let { observeTradePlanQuote(restored, it) } ?: restored
+        }) }
+        newQuoteRequest(acc.stock.marketCode)
         persist()
     }
 
     /** 手动设置选中股票的现价，用于计算各批次浮动盈亏 */
     fun setCurrentPrice(price: Double?) {
+        if (price != null && !price.isFinite()) { notify("请输入有效现价"); return }
         if (price != null && price < 0) { notify("现价不能为负"); return }
         val idx = _state.value.selectedIndex
         if (idx < 0) { notify("请先添加并选择股票"); return }
+        _state.value.selected?.stock?.marketCode?.let(::newQuoteRequest)
         _state.update { s ->
             s.copy(
-                accounts = updateSelected(s) { it.copy(currentPrice = price) },
+                accounts = updateSelected(s) { account ->
+                    if (price != null && price > 0) observeTradePlanQuote(account, price) else account.copy(currentPrice = price)
+                },
                 message = if (price != null) "已更新现价 ${formatPrice(price)} 元" else "已清除现价"
             )
         }
@@ -380,7 +448,9 @@ class StockViewModel(
 
     /** 清空当前选中股票的数据 */
     fun clearSelected() {
-        val name = _state.value.selected?.stock?.name ?: return
+        val account = _state.value.selected ?: return
+        val name = account.stock.name
+        newQuoteRequest(account.stock.marketCode)
         _state.update { s ->
             s.copy(
                 accounts = updateSelected(s) { StockAccount(it.stock) },
@@ -392,6 +462,7 @@ class StockViewModel(
 
     /** 一键清空所有股票 */
     fun clearAll() {
+        latestQuoteRequests.clear()
         _state.update { StockState(message = "已清空所有股票数据") }
         persist()
     }

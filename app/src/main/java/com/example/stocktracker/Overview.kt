@@ -29,6 +29,16 @@ fun allTradesSorted(accounts: List<StockAccount>): List<Pair<Stock, TradeRecord>
     accounts.flatMap { acc -> acc.trades.map { acc.stock to it } }
         .sortedByDescending { it.second.time }
 
+private data class RealizedCashflow(val time: Long, val amount: Double)
+
+/** Keep corporate cash income separate from actual buy and sell records. */
+private fun realizedCashflows(account: StockAccount): List<RealizedCashflow> =
+    account.trades.filter { it.type == TradeType.SELL }.map { RealizedCashflow(it.time, it.netProfit) } +
+        account.planAdjustments.map { RealizedCashflow(it.time, it.input.netCash) }
+
+private fun accountingTimes(account: StockAccount): List<Long> =
+    account.trades.map { it.time } + account.planAdjustments.map { it.time }
+
 /**
  * 浮盈为正时是否可卖的提示（T+1 冻结角度）：
  * - 全部可卖 → null（不标记）
@@ -124,13 +134,11 @@ fun realizedRangeLabel(range: RealizedRange, now: Long = System.currentTimeMilli
     }
 }
 
-/** 指定时间段内各股票的已实现盈亏（含费）：只统计区间内的卖出净盈亏（纯函数，可单测） */
+/** Aggregate realized sales and actual corporate cash flows inside the requested interval. */
 fun realizedEntriesInRange(accounts: List<StockAccount>, range: RealizedRange, now: Long = System.currentTimeMillis()): List<OverviewEntry> {
     val (from, to) = realizedRangeBounds(range, now)
     return accounts.map { acc ->
-        val realized = acc.trades
-            .filter { it.type == TradeType.SELL && it.time in from until to }
-            .sumOf { it.netProfit }
+        val realized = realizedCashflows(acc).filter { it.time in from until to }.sumOf { it.amount }
         OverviewEntry(acc.stock.name, realized)
     }
 }
@@ -144,15 +152,15 @@ fun daysInMonth(year: Int, month: Int): Int {
     return cal.getActualMaximum(Calendar.DAY_OF_MONTH)
 }
 
-/** 某年某月每天（1..月末）的已实现收益，无卖出的当天为 0（纯函数，可单测） */
+/** Return each day's realized sale profit plus actual corporate cash income. */
 fun realizedDayTotalsInMonth(accounts: List<StockAccount>, year: Int, month: Int): List<Double> {
     val n = daysInMonth(year, month)
     val totals = DoubleArray(n)
     accounts.forEach { acc ->
-        acc.trades.filter { it.type == TradeType.SELL }.forEach { tr ->
-            val cal = Calendar.getInstance().apply { timeInMillis = tr.time }
+        realizedCashflows(acc).forEach { flow ->
+            val cal = Calendar.getInstance().apply { timeInMillis = flow.time }
             if (cal.get(Calendar.YEAR) == year && cal.get(Calendar.MONTH) + 1 == month) {
-                totals[cal.get(Calendar.DAY_OF_MONTH) - 1] += tr.netProfit
+                totals[cal.get(Calendar.DAY_OF_MONTH) - 1] += flow.amount
             }
         }
     }
@@ -170,8 +178,8 @@ fun realizedMonthTotals(accounts: List<StockAccount>, now: Long = System.current
     var oldestY = curY
     var oldestM = curM
     accounts.forEach { acc ->
-        acc.trades.forEach { tr ->
-            val cal = Calendar.getInstance().apply { timeInMillis = tr.time }
+        accountingTimes(acc).forEach { time ->
+            val cal = Calendar.getInstance().apply { timeInMillis = time }
             val y = cal.get(Calendar.YEAR)
             val m = cal.get(Calendar.MONTH) + 1
             if (y < oldestY || (y == oldestY && m < oldestM)) {
@@ -186,9 +194,7 @@ fun realizedMonthTotals(accounts: List<StockAccount>, now: Long = System.current
     var m = curM
     while (y > oldestY || (y == oldestY && m >= oldestM)) {
         val total = accounts.sumOf { acc ->
-            acc.trades
-                .filter { it.type == TradeType.SELL && dayOf(it.time) == (y to m) }
-                .sumOf { it.netProfit }
+            realizedCashflows(acc).filter { dayOf(it.time) == (y to m) }.sumOf { it.amount }
         }
         result.add(Triple(y, m, total))
         m--
@@ -204,14 +210,14 @@ fun realizedMonthTotals(accounts: List<StockAccount>, now: Long = System.current
 fun realizedYearTotals(accounts: List<StockAccount>, now: Long = System.currentTimeMillis()): List<Pair<Int, Double>> {
     val nowCal = Calendar.getInstance().apply { timeInMillis = now }
     val curY = nowCal.get(Calendar.YEAR)
-    // 最早年份：数据里最老一笔交易年份；无数据则今年
-    val oldestY = accounts.flatMap { it.trades.map { tr -> Calendar.getInstance().apply { timeInMillis = tr.time }.get(Calendar.YEAR) } }
+    // Corporate cash flows also establish the oldest accounting year.
+    val oldestY = accounts.flatMap { acc -> accountingTimes(acc).map { time -> Calendar.getInstance().apply { timeInMillis = time }.get(Calendar.YEAR) } }
         .minOrNull() ?: curY
     return (oldestY..curY).reversed().map { y ->
         val total = accounts.sumOf { acc ->
-            acc.trades
-                .filter { it.type == TradeType.SELL && Calendar.getInstance().apply { timeInMillis = it.time }.get(Calendar.YEAR) == y }
-                .sumOf { it.netProfit }
+            realizedCashflows(acc)
+                .filter { Calendar.getInstance().apply { timeInMillis = it.time }.get(Calendar.YEAR) == y }
+                .sumOf { it.amount }
         }
         y to total
     }

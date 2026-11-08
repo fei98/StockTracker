@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+**/data/
+**/*_cache.json
+**/outputs/*
+!**/outputs/*.md
+!**/outputs/*.png
+!**/outputs/parameter_grid.csv
+!**/outputs/trades.csv
+!**/outputs/yearly.csv

@@ -18,4 +18,8 @@ local.properties
 # 密钥/日志
 *.keystore
 *.jks
+*.keystore.*
+*.jks.*
+keystore.properties
+signing.properties
 *.log

@@ -1,0 +1,43 @@
+{
+  "candidate": {
+    "lower": 7500,
+    "upper": 50000,
+    "step": "10",
+    "amount": 9000
+  },
+  "candidate_id": "L7500_U50000_S10_A9000",
+  "seeds": [
+    {
+      "lower": 25000,
+      "upper": 50000,
+      "step": "5",
+      "amount": 6000
+    },
+    {
+      "lower": 30000,
+      "upper": 45000,
+      "step": "10",
+      "amount": 8000
+    },
+    {
+      "lower": 10000,
+      "upper": 50000,
+      "step": "10",
+      "amount": 8000
+    }
+  ],
+  "coarse_count": 1056,
+  "fine_center_count": 126,
+  "training_evaluated_count_including_support": 1467,
+  "training_sha256": "4d96d395970f351daaf2721fbd7cf4f830fbc8f3b69406b5927760cf5c437a3e",
+  "fingerprint": "cac8767554ebf3dcfb6f3a8998116959b74d92d128924c79b7553e6e99fc955c",
+  "risk_limit_pct": "20",
+  "training_end": "2025-11-06",
+  "validation_start": "2025-11-07",
+  "created_at_utc": "2026-11-07T15:04:31.837562+00:00",
+  "selection_rule": "Both slippages within 20% on training; at least four real physical neighbors; at least half of neighbors including self risk-eligible; maximize median worst neighbor return, then own worst return, lower drawdown, deterministic point.",
+  "metrics_cache_fingerprint_v2": "b0e41d1cf9034d9eb16aaf75cef077603f5048af6369a585c635bf029a9f46c4",
+  "cache_scheme_note": "Metric fingerprints now cover data, simulation code and Point.config only. Ranking-only neighbor validation does not change any metric, seed, chosen candidate or training result hash.",
+  "metrics_cache_fingerprint_v3": "41b2968e7e32c77bc98221d86eb170c93bda80012de464ef505cf7373f544e6f",
+  "cache_dependency_note": "Added all transitive simulation helpers, worker partition code and SPLIT to metric cache dependency fingerprint; underlying source code and all metric rows unchanged."
+}

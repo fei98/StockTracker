@@ -12,7 +12,9 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            StockApp()
+            StockApp(onLeaveTask = {
+                if (!moveTaskToBack(true)) finish()
+            })
         }
     }
 }

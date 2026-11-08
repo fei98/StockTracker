@@ -1,8 +1,18 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+val localBuildProperties = Properties().apply {
+    val propertiesFile = rootProject.file("local.properties")
+    if (propertiesFile.isFile) propertiesFile.inputStream().use { load(it) }
+}
+val sharedDebugKeystore = providers.gradleProperty("stockTrackerKeystore")
+    .orElse(providers.environmentVariable("STOCKTRACKER_KEYSTORE")).orNull
+    ?: localBuildProperties.getProperty("stockTrackerKeystore")
 
 android {
     namespace = "com.example.stocktracker"
@@ -12,8 +22,16 @@ android {
         applicationId = "com.example.stocktracker"
         minSdk = 26
         targetSdk = 35
-        versionCode = 44
-        versionName = "3.23"
+        versionCode = 45
+        versionName = "3.24"
+    }
+
+    signingConfigs {
+        if (sharedDebugKeystore != null) {
+            val sharedFile = rootProject.file(sharedDebugKeystore)
+            require(sharedFile.isFile) { "The configured shared debug keystore does not exist." }
+            getByName("debug").storeFile = sharedFile
+        }
     }
 
     buildTypes {
